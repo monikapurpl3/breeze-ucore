@@ -29,7 +29,7 @@ Breeze Core a step above the vendor's platform:
   curves, and the live stream.
 - **Held to Breeze Core, not just modelled on it.** A differential test runs a
   real Breeze Core and μcore on the same emulated air conditioners
-  ([breeze-mock](https://github.com/monikapurpl3/breeze-mock)) and requires
+  (breeze-mock) and requires
   the same status, headers and body for every request it compares.
 - **Built to port.** The core is `no_std`, does no I/O of its own, runs on one
   thread with every limit fixed at compile time; a new chip is a small adapter,
