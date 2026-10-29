@@ -31,6 +31,28 @@ store fixtures, the curve samples and the auth vectors are ported, and a
 differential test holds μcore's answers to a real `breeze-core`'s on the same
 emulated units (breeze-mock).
 
+## Versions
+
+**The product version is `<μcore version>u<Breeze Core native version>`**,
+for example `1.0.0u4.3.2`: μcore's own version, then `u`, then the Breeze
+Core native release whose behaviour it follows (its API, its store formats,
+the release the differential test runs against). That is what people see:
+release names, firmware file names, `--version`, the boot log. Cargo needs
+plain semver, so the crates are `1.0.0`, and the full string is built from
+that and one constant naming the native release.
+
+**On the wire it is `4.3.2+u1.0.0`.** `/api/version` reports the API it
+speaks, so anything that parses versions sees 4.3.2. The μcore version rides
+along as semver build metadata, which every parser ignores for comparison and
+every printer shows, so `diag`, breezectl and bug reports still say what the
+server really is. (The Android app's own parser splits at `-` and `+` before
+comparing.) `name` is `Breeze μcore`; no client compares it.
+
+What a client may do is still decided by `features`, never by the version.
+The app's Nerd screen is the one place that gates on the version: against
+μcore it would pass and then find no `/api/system`. That screen should check
+`system_info` instead (milestone 5).
+
 ## What it keeps
 
 Advertised features (the names `/api/version` uses):

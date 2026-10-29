@@ -1,0 +1,13 @@
+[package]
+name = "ucore-host"
+description = "Breeze μcore on an ordinary computer: development, tests, small routers."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ucore"
+path = "src/main.rs"
+
+[dependencies]
+ucore = { path = "../ucore" }

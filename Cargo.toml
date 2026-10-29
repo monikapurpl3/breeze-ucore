@@ -1,0 +1,17 @@
+[workspace]
+members = ["crates/ucore", "crates/ucore-host"]
+resolver = "2"
+
+[workspace.package]
+# The crates' semver. The product version is this plus `u` and the Breeze Core
+# native release μcore follows (ucore::NATIVE): 1.0.0u4.3.2. See DESIGN.md.
+version = "1.0.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,16 @@
+[package]
+name = "ucore"
+description = "Breeze μcore: Breeze Core for small machines. no_std, no I/O of its own."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+aes = { version = "0.8.4", default-features = false }
+md-5 = { version = "0.10.6", default-features = false }
+sha2 = { version = "0.10.9", default-features = false }
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+# float_roundtrip: devices.json stores timestamps as floats, and the default
+# parser is one ULP off, which rewrites the file on every save (Breeze Core
+# found this the hard way).
+serde_json = { version = "1.0", default-features = false, features = ["alloc", "float_roundtrip"] }
