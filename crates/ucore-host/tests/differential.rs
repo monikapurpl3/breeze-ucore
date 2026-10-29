@@ -1,0 +1,349 @@
+//! μcore against the real thing: a Breeze Core binary and μcore on the same
+//! configuration and the same emulated units (breeze-mock), the same requests,
+//! and the same answers. Byte for byte where Breeze Core's answer is fixed;
+//! key for key and value for value where a reading moves between two calls.
+//!
+//!   BREEZE_CORE_BIN=/path/to/breeze-core BREEZE_MOCK_BIN=/path/to/breeze-mock \
+//!     cargo test -p ucore-host --test differential
+//!
+//! Skipped without both. This is what holds μcore to Breeze Core.
+
+use serde_json::{json, Value};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
+const KEY: &str = "ucore-diff-key-not-a-secret";
+const TOKEN: &str = "ucore-diff-device-token-not-a-secret-0123456789";
+
+struct Kill(Child);
+impl Drop for Kill {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+struct Answer {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+impl Answer {
+    fn json(&self) -> Value {
+        serde_json::from_slice(&self.body).unwrap_or(Value::Null)
+    }
+
+    /// What a client could act on: everything but framing, dates and the
+    /// server's name for itself.
+    fn comparable_headers(&self) -> Vec<(String, String)> {
+        let mut h: Vec<_> = self
+            .headers
+            .iter()
+            .map(|(n, v)| (n.to_ascii_lowercase(), v.clone()))
+            .filter(|(n, _)| !matches!(n.as_str(), "connection" | "date" | "content-length" | "transfer-encoding" | "server"))
+            .collect();
+        h.sort();
+        h
+    }
+}
+
+fn call(port: u16, method: &str, path: &str, headers: &[(&str, &str)], body: &str) -> Answer {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    let mut req = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n");
+    for (n, v) in headers {
+        req.push_str(&format!("{n}: {v}\r\n"));
+    }
+    if !body.is_empty() || method == "POST" {
+        req.push_str(&format!("Content-Type: application/json\r\nContent-Length: {}\r\n", body.len()));
+    }
+    req.push_str("\r\n");
+    req.push_str(body);
+    s.write_all(req.as_bytes()).unwrap();
+    let mut r = BufReader::new(s);
+    let mut line = String::new();
+    r.read_line(&mut line).unwrap();
+    let status = line.split(' ').nth(1).unwrap().parse().unwrap();
+    let mut headers = Vec::new();
+    loop {
+        line.clear();
+        r.read_line(&mut line).unwrap();
+        let l = line.trim_end();
+        if l.is_empty() {
+            break;
+        }
+        let (n, v) = l.split_once(':').unwrap();
+        headers.push((n.trim().to_string(), v.trim().to_string()));
+    }
+    let len: Option<usize> = headers
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case("content-length"))
+        .map(|(_, v)| v.parse().unwrap());
+    let mut body = Vec::new();
+    match len {
+        Some(n) => {
+            body.resize(n, 0);
+            r.read_exact(&mut body).unwrap();
+        }
+        None => {
+            r.read_to_end(&mut body).unwrap();
+        }
+    }
+    Answer { status, headers, body }
+}
+
+/// A request: method, path, headers, body.
+type Case<'a> = (&'a str, String, Vec<(&'a str, &'a str)>, &'a str);
+
+const AUTH: [(&str, &str); 2] = [("X-API-Key", KEY), ("Authorization", "Bearer ucore-diff-device-token-not-a-secret-0123456789")];
+
+fn wait_for(port: u16, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(Instant::now() < deadline, "{what} did not start on {port}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Keys and value types, recursively: for answers whose readings move.
+fn shape(v: &Value) -> Value {
+    match v {
+        Value::Object(o) => Value::Object(o.iter().map(|(k, v)| (k.clone(), shape(v))).collect()),
+        Value::Array(a) => Value::Array(a.iter().map(shape).collect()),
+        Value::Number(_) => json!("number"),
+        Value::String(_) => json!("string"),
+        Value::Bool(_) => json!("bool"),
+        Value::Null => json!("null"),
+    }
+}
+
+/// Without the readings that move between two calls.
+fn steady(v: &Value) -> Value {
+    let mut v = v.clone();
+    for list in ["states", "errors"] {
+        if let Some(items) = v.get_mut(list).and_then(Value::as_array_mut) {
+            for item in items {
+                item.as_object_mut().map(|o| o.remove("indoor_temperature"));
+            }
+        }
+    }
+    v.as_object_mut().map(|o| o.remove("indoor_temperature"));
+    v
+}
+
+fn bins() -> Option<(PathBuf, PathBuf)> {
+    let core = std::env::var_os("BREEZE_CORE_BIN").map(PathBuf::from)?;
+    let mock = std::env::var_os("BREEZE_MOCK_BIN").map(PathBuf::from)?;
+    Some((core, mock))
+}
+
+fn devices_json(dir: &Path) {
+    // The same paired device for both servers: a v1 token, stored hashed.
+    let hash = ucore::auth::hash_secret(TOKEN);
+    let doc = json!({"devices": [{
+        "token_id": "diff-device", "label": "diff", "auth_version": 1,
+        "token_hash": hash, "public_key": null, "created_at": 1790000000.0,
+        "expires_at": null, "last_used": null
+    }]});
+    std::fs::write(dir.join("devices.json"), serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+}
+
+#[test]
+fn ucore_answers_as_breeze_core_does() {
+    let Some((core_bin, mock_bin)) = bins() else {
+        eprintln!("skipped: set BREEZE_CORE_BIN and BREEZE_MOCK_BIN to compare against Breeze Core");
+        return;
+    };
+    let work = std::env::temp_dir().join(format!("ucore-diff-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).unwrap();
+    let blueprint = work.join("units.xml");
+    std::fs::write(
+        &blueprint,
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<blueprint xmlns="urn:breeze-mock:blueprint:1" version="1" name="ucore-diff" seed="7">
+  <environment><constant outdoor="10"/></environment>
+  <network><segment name="lo" cidr="127.93.1.0/24" mode="loopback" discovery="false"/></network>
+  <unit key="a" segment="lo" ip="127.93.1.2">
+    <epithets name="Alpha"/><v3 token="auto" key="auto"/>
+    <state power="on" mode="cool" target="24"/><behaviour reply-delay="0ms"/>
+  </unit>
+  <unit key="b" segment="lo" ip="127.93.1.3">
+    <epithets name="Bravo"/><v3 token="auto" key="auto"/>
+    <capabilities modes="auto cool heat fan-only" swing="vertical" fan="low high auto" eco="false" turbo="cool"/>
+    <state power="on" mode="heat" target="22"/><behaviour reply-delay="0ms"/>
+  </unit>
+</blueprint>
+"#,
+    )
+    .unwrap();
+    let mock_data = work.join("mock-data");
+    let _mock = Kill(
+        Command::new(&mock_bin)
+            .args(["run", blueprint.to_str().unwrap(), "-q"])
+            .env("BREEZE_MOCK_DATA", &mock_data)
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while TcpStream::connect("127.93.1.3:6444").is_err() {
+        assert!(Instant::now() < deadline, "breeze-mock did not start its units");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // One configuration for both: the exported units, plus a unit nothing
+    // answers for and a unit without V3 credentials.
+    let real_dir = work.join("real");
+    let ucore_dir = work.join("ucore");
+    for d in [&real_dir, &ucore_dir] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let out = Command::new(&mock_bin)
+        .args(["export", "breeze-core-config", blueprint.to_str().unwrap()])
+        .env("BREEZE_MOCK_DATA", &mock_data)
+        .output()
+        .unwrap();
+    let mut config: Value = serde_json::from_slice(&out.stdout).expect("export prints the config");
+    config["api_key"] = json!(KEY);
+    let units = config["units"].as_array_mut().unwrap();
+    let mut dead = units[0].clone();
+    dead["name"] = json!("Dead");
+    dead["ip"] = json!("127.93.1.9");
+    dead["id"] = json!(111111111111i64);
+    units.push(dead);
+    units.push(json!({"name": "Bare", "ip": "127.93.1.10", "port": 6444, "id": 222222222222i64, "token": null, "key": null}));
+    for d in [&real_dir, &ucore_dir] {
+        std::fs::write(d.join("config.json"), serde_json::to_string_pretty(&config).unwrap()).unwrap();
+        devices_json(d);
+    }
+    let alpha = config["units"][0]["id"].to_string();
+    let bravo = config["units"][1]["id"].to_string();
+
+    let (real, ucore) = (29301u16, 29302u16);
+    let _real = Kill(
+        Command::new(&core_bin)
+            .arg("serve")
+            .env("AC_CONFIG_DIR", &real_dir)
+            .env("BREEZE_HOST", "127.0.0.1")
+            .env("BREEZE_PORT", real.to_string())
+            .env("BREEZE_LOG", "0")
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let _ucore = Kill(
+        Command::new(env!("CARGO_BIN_EXE_ucore"))
+            .env("AC_CONFIG_DIR", &ucore_dir)
+            .env("BREEZE_HOST", "127.0.0.1")
+            .env("BREEZE_PORT", ucore.to_string())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    wait_for(real, "breeze-core");
+    wait_for(ucore, "ucore");
+
+    let ids = [alpha.as_str(), bravo.as_str(), "111111111111", "222222222222"];
+    let mut exact: Vec<Case> = vec![
+        ("GET", "/api/health".into(), vec![], ""),
+        ("GET", "/api/units".into(), AUTH.to_vec(), ""),
+        ("GET", "/api/units".into(), vec![], ""),
+        ("GET", "/api/units".into(), vec![("X-API-Key", "wrong-key")], ""),
+        ("GET", "/api/units".into(), vec![("X-API-Key", KEY), ("Authorization", "Bearer nobody-knows-this-token-0123456789")], ""),
+        ("GET", "/api/units".into(), vec![("X-API-Key", KEY)], ""),
+        ("PUT", "/api/units".into(), AUTH.to_vec(), ""),
+        ("GET", "/api/nope".into(), AUTH.to_vec(), ""),
+        ("GET", "/api/units/999/state".into(), AUTH.to_vec(), ""),
+        ("GET", "/api/units/abc/state".into(), AUTH.to_vec(), ""),
+        ("GET", format!("/api/units/{alpha}"), AUTH.to_vec(), ""),
+        ("GET", format!("/api/units/{alpha}/control"), AUTH.to_vec(), ""),
+        ("POST", format!("/api/units/{alpha}/control"), AUTH.to_vec(), "nope"),
+        ("POST", format!("/api/units/{alpha}/control"), AUTH.to_vec(), ""),
+        ("POST", format!("/api/units/{alpha}/control"), AUTH.to_vec(), r#"{"power_state": "yes"}"#),
+        ("POST", format!("/api/units/{alpha}/control"), AUTH.to_vec(), r#"{"target_temperature": 99}"#),
+        ("POST", format!("/api/units/{alpha}/control"), AUTH.to_vec(), r#"{"target_temperature": 22.3}"#),
+        ("POST", format!("/api/units/{alpha}/control"), AUTH.to_vec(), r#"{"fan_speed": 7}"#),
+        ("POST", format!("/api/units/{alpha}/control"), AUTH.to_vec(), r#"{"operational_mode": "WARP"}"#),
+        ("POST", format!("/api/units/{alpha}/control"), AUTH.to_vec(), r#"{"swing_mode": "sideways"}"#),
+        ("POST", "/api/units/222222222222/control".into(), AUTH.to_vec(), r#"{"power_state": true}"#),
+        ("GET", "/api/units/222222222222/state".into(), AUTH.to_vec(), ""),
+        ("GET", "/api/units/111111111111/state".into(), AUTH.to_vec(), ""),
+    ];
+    for id in &ids[..2] {
+        exact.push(("GET", format!("/api/units/{id}/capabilities"), AUTH.to_vec(), ""));
+    }
+    let mut failures = Vec::new();
+    for (method, path, headers, body) in &exact {
+        let r = call(real, method, path, headers, body);
+        let u = call(ucore, method, path, headers, body);
+        let what = format!("{method} {path} {body}");
+        // Not vacuous: Breeze Core sends its hardening headers on everything.
+        assert!(r.comparable_headers().iter().any(|(n, _)| n == "x-content-type-options"), "{what}: no headers to compare");
+        if (u.status, u.comparable_headers()) != (r.status, r.comparable_headers()) {
+            failures.push(format!("{what}\n   real  {} {:?}\n   ucore {} {:?}", r.status, r.comparable_headers(), u.status, u.comparable_headers()));
+        }
+        if u.body != r.body {
+            failures.push(format!(
+                "{what}: body\n   real  {}\n   ucore {}",
+                String::from_utf8_lossy(&r.body),
+                String::from_utf8_lossy(&u.body)
+            ));
+        }
+    }
+
+    // Readings that move: the same keys and types, and the same values apart
+    // from the room temperature.
+    for path in [format!("/api/units/{alpha}/state"), format!("/api/units/{bravo}/state"), "/api/units/state".into()] {
+        let (r, u) = (call(real, "GET", &path, &AUTH, ""), call(ucore, "GET", &path, &AUTH, ""));
+        if r.status != u.status || shape(&r.json()) != shape(&u.json()) || steady(&r.json()) != steady(&u.json()) {
+            failures.push(format!("GET {path}\n   real  {} {}\n   ucore {} {}", r.status, r.json(), u.status, u.json()));
+        }
+    }
+
+    // And not because both failed alike: what μcore said is what it should.
+    let one = call(ucore, "GET", &format!("/api/units/{alpha}/state"), &AUTH, "").json();
+    assert_eq!((one["online"].clone(), one["name"].clone()), (json!(true), json!("Alpha")), "{one}");
+    let all = call(ucore, "GET", "/api/units/state", &AUTH, "").json();
+    let names = |k: &str| all[k].as_array().unwrap().iter().map(|s| s["name"].clone()).collect::<Vec<_>>();
+    assert_eq!((names("states"), names("errors")), (vec![json!("Alpha"), json!("Bravo")], vec![json!("Dead"), json!("Bare")]), "{all}");
+
+    // Controls, through each in turn, on the same unit: the same answer, and
+    // Bravo refuses turbo while heating in both.
+    let mut answers = Vec::new();
+    for body in [r#"{"turbo": true}"#, r#"{"power_state": true, "operational_mode": "HEAT", "target_temperature": 23.5, "fan_speed": 80}"#] {
+        let path = format!("/api/units/{bravo}/control");
+        let r = call(real, "POST", &path, &AUTH, body);
+        let u = call(ucore, "POST", &path, &AUTH, body);
+        if r.status != u.status || steady(&r.json()) != steady(&u.json()) {
+            failures.push(format!("POST {path} {body}\n   real  {} {}\n   ucore {} {}", r.status, r.json(), u.status, u.json()));
+        }
+        answers.push(u.json());
+    }
+    assert_eq!(answers[0]["not_applied"], json!(["turbo"]), "{}", answers[0]);
+    assert_eq!(
+        (&answers[1]["operational_mode"], &answers[1]["target_temperature"], &answers[1]["fan_speed"], &answers[1]["not_applied"]),
+        (&json!("HEAT"), &json!(23.5), &json!(80), &json!([])),
+        "{}",
+        answers[1]
+    );
+
+    // /api/version: Breeze Core's shape, μcore's identity.
+    let (r, u) = (call(real, "GET", "/api/version", &AUTH, "").json(), call(ucore, "GET", "/api/version", &AUTH, "").json());
+    let keys = |v: &Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+    assert_eq!(keys(&r), keys(&u), "/api/version keys");
+    assert_eq!(u["name"], "Breeze μcore");
+    assert_eq!(u["version"], format!("{}+u{}", ucore::NATIVE, ucore::VERSION));
+    assert_eq!((r["units"].clone(), r["min_auth_version"].clone()), (u["units"].clone(), u["min_auth_version"].clone()));
+    for f in u["features"].as_array().unwrap() {
+        assert!(r["features"].as_array().unwrap().contains(f), "μcore advertises {f}, which Breeze Core does not");
+    }
+
+    assert!(failures.is_empty(), "{} difference(s):\n{}", failures.len(), failures.join("\n"));
+    drop((_ucore, _real, _mock));
+    let _ = std::fs::remove_dir_all(&work);
+}
