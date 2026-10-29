@@ -182,6 +182,12 @@ fn signed(port: u16, key: &ed25519_dalek::SigningKey, key_id: &str, method: &str
     call(port, method, path, &headers, body)
 }
 
+/// The μcore under test: this build's, or UCORE_BIN (a cross-built one run
+/// where this test binary was copied to).
+fn ucore_bin() -> PathBuf {
+    std::env::var_os("UCORE_BIN").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_ucore")))
+}
+
 fn bins() -> Option<(PathBuf, PathBuf)> {
     let core = std::env::var_os("BREEZE_CORE_BIN").map(PathBuf::from)?;
     let mock = std::env::var_os("BREEZE_MOCK_BIN").map(PathBuf::from)?;
@@ -284,7 +290,7 @@ fn ucore_answers_as_breeze_core_does() {
             .unwrap(),
     );
     let _ucore = Kill(
-        Command::new(env!("CARGO_BIN_EXE_ucore"))
+        Command::new(ucore_bin())
             .env("AC_CONFIG_DIR", &ucore_dir)
             .env("BREEZE_HOST", "127.0.0.1")
             .env("BREEZE_PORT", ucore.to_string())
@@ -497,6 +503,45 @@ fn ucore_answers_as_breeze_core_does() {
     };
     if skeleton(&real_dir) != skeleton(&ucore_dir) {
         failures.push(format!("devices.json\n   real  {:?}\n   ucore {:?}", skeleton(&real_dir), skeleton(&ucore_dir)));
+    }
+
+    // ------------------------------------------------------- the configuration
+    // Everything short of probing an address (which needs units on a private
+    // network: the Linux run does that). Last, since it changes the units.
+    let long = "x".repeat(65);
+    let adds: Vec<String> = vec![
+        "nope".into(),
+        r#"{"name": "no address"}"#.into(),
+        r#"{"ip": "not-an-ip"}"#.into(),
+        r#"{"ip": " 10.0.0.1 ", "token": "zz", "key": "zz"}"#.into(),
+        format!(r#"{{"ip": "10.0.0.1", "key": "{}"}}"#, "ab".repeat(32)),
+        format!(r#"{{"ip": "10.0.0.1", "token": "{}"}}"#, "ab".repeat(64)),
+        format!(r#"{{"ip": "10.0.0.1", "name": "{long}"}}"#),
+        r#"{"ip": "127.93.1.2"}"#.into(),
+        r#"{"ip": "8.8.8.8", "midea_account": "a", "midea_password": "b"}"#.into(),
+    ];
+    for body in &adds {
+        compare_exact(&mut failures, real, ucore, "POST", "/api/units", &AUTH, body);
+    }
+    compare_exact(&mut failures, real, ucore, "GET", "/api/config", &AUTH, "");
+    for (method, path, body) in [
+        ("PATCH", "/api/units/111111111111".to_string(), "nope".to_string()),
+        ("PATCH", "/api/units/111111111111".into(), r#"{"name": "   "}"#.into()),
+        ("PATCH", "/api/units/111111111111".into(), format!(r#"{{"name": "{long}"}}"#)),
+        ("PATCH", "/api/units/999".into(), r#"{"name": "Nobody"}"#.into()),
+        ("PATCH", "/api/units/0111111111111".into(), r#"{"name": "Leading zero"}"#.into()),
+        ("PATCH", "/api/units/111111111111".into(), r#"{"name": "  Spare room  "}"#.into()),
+        ("DELETE", "/api/units/999".into(), String::new()),
+        ("DELETE", "/api/units/222222222222".into(), String::new()),
+        ("GET", "/api/config".into(), String::new()),
+        ("GET", "/api/units".into(), String::new()),
+    ] {
+        compare_exact(&mut failures, real, ucore, method, &path, &AUTH, &body);
+    }
+    // And the file both rewrote from the same start: byte for byte.
+    let (rc, uc) = (std::fs::read(real_dir.join("config.json")).unwrap(), std::fs::read(ucore_dir.join("config.json")).unwrap());
+    if rc != uc {
+        failures.push(format!("config.json\n   real  {}\n   ucore {}", String::from_utf8_lossy(&rc), String::from_utf8_lossy(&uc)));
     }
 
     assert!(failures.is_empty(), "{} difference(s):\n{}", failures.len(), failures.join("\n"));

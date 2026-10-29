@@ -17,6 +17,7 @@
 pub mod ac;
 pub mod caps;
 pub mod crypto;
+pub mod discover;
 pub mod frame;
 pub mod lan;
 pub mod packet;

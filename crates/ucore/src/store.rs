@@ -36,6 +36,42 @@ pub struct AppConfig {
     pub units: Vec<UnitConfig>,
 }
 
+impl AppConfig {
+    /// By the id as written: `0123` is not unit 123 here, as in Breeze Core.
+    pub fn find_unit(&self, id: &str) -> Option<&UnitConfig> {
+        self.units.iter().find(|u| alloc::string::ToString::to_string(&u.id) == id)
+    }
+
+    pub fn find_unit_mut(&mut self, id: &str) -> Option<&mut UnitConfig> {
+        self.units.iter_mut().find(|u| alloc::string::ToString::to_string(&u.id) == id)
+    }
+
+    /// A unit already there is updated in place; its credentials are only
+    /// ever replaced *with* credentials.
+    pub fn add_or_update_unit(&mut self, unit: UnitConfig) {
+        match self.units.iter_mut().find(|u| u.id == unit.id) {
+            Some(existing) => {
+                existing.ip = unit.ip;
+                existing.port = unit.port;
+                existing.name = unit.name;
+                if unit.token.is_some() {
+                    existing.token = unit.token;
+                }
+                if unit.key.is_some() {
+                    existing.key = unit.key;
+                }
+            }
+            None => self.units.push(unit),
+        }
+    }
+
+    pub fn remove_unit(&mut self, id: &str) -> bool {
+        let before = self.units.len();
+        self.units.retain(|u| alloc::string::ToString::to_string(&u.id) != id);
+        self.units.len() != before
+    }
+}
+
 /// A paired client in `devices.json`: a hashed v1 token or a v2 public key.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeviceRecord {

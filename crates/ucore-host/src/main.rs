@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
-use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -17,6 +17,7 @@ enum Sock {
     /// A blocking connect runs on its own thread, so this one never waits.
     Connecting(Receiver<std::io::Result<TcpStream>>),
     Open(TcpStream),
+    Udp(UdpSocket),
 }
 
 struct Host {
@@ -54,7 +55,7 @@ impl Host {
         match self.conns.get_mut(&conn) {
             Some(Sock::Open(s)) => Ok(s),
             Some(Sock::Connecting(_)) => Err(NetError::new(NetKind::WouldBlock, "still connecting")),
-            None => Err(closed()),
+            Some(Sock::Udp(_)) | None => Err(closed()),
         }
     }
 }
@@ -82,7 +83,7 @@ impl Platform for Host {
 
     fn is_connected(&mut self, conn: Conn) -> Result<bool, NetError> {
         let result = match self.conns.get(&conn) {
-            Some(Sock::Open(_)) => return Ok(true),
+            Some(Sock::Open(_) | Sock::Udp(_)) => return Ok(true),
             Some(Sock::Connecting(rx)) => match rx.try_recv() {
                 Ok(r) => r,
                 Err(TryRecvError::Empty) => return Ok(false),
@@ -114,6 +115,27 @@ impl Platform for Host {
 
     fn close(&mut self, conn: Conn) {
         self.conns.remove(&conn);
+    }
+
+    fn udp_open(&mut self) -> Result<Conn, NetError> {
+        let s = UdpSocket::bind("0.0.0.0:0").map_err(net_error)?;
+        s.set_broadcast(true).map_err(net_error)?;
+        s.set_nonblocking(true).map_err(net_error)?;
+        Ok(self.id(Sock::Udp(s)))
+    }
+
+    fn udp_send(&mut self, sock: Conn, to: IpAddr, port: u16, data: &[u8]) -> Result<(), NetError> {
+        match self.conns.get(&sock) {
+            Some(Sock::Udp(s)) => s.send_to(data, SocketAddr::new(to, port)).map(|_| ()).map_err(net_error),
+            _ => Err(closed()),
+        }
+    }
+
+    fn udp_recv(&mut self, sock: Conn, buf: &mut [u8]) -> Result<(usize, IpAddr), NetError> {
+        match self.conns.get(&sock) {
+            Some(Sock::Udp(s)) => s.recv_from(buf).map(|(n, from)| (n, from.ip())).map_err(net_error),
+            _ => Err(closed()),
+        }
     }
 
     fn read_file(&mut self, name: &str) -> Option<Vec<u8>> {

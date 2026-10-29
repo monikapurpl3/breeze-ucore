@@ -516,6 +516,11 @@ impl Unit {
         Ok(Some(self.rx.drain(..total).collect()))
     }
 
+    /// The unit is going: close its connection.
+    pub fn shutdown(mut self, p: &mut impl Platform) {
+        self.drop_session(p);
+    }
+
     fn drop_session(&mut self, p: &mut impl Platform) {
         if let Some(c) = self.conn.take() {
             p.close(c);

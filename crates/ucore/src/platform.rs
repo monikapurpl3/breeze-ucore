@@ -57,7 +57,14 @@ pub trait Platform {
     fn send(&mut self, conn: Conn, data: &[u8]) -> Result<usize, NetError>;
     /// `Ok(0)` when the other end has closed; `WouldBlock` when nothing is in.
     fn recv(&mut self, conn: Conn, buf: &mut [u8]) -> Result<usize, NetError>;
+    /// Close a connection or a UDP socket.
     fn close(&mut self, conn: Conn);
+
+    /// A UDP socket on any local port, allowed to broadcast: discovery.
+    fn udp_open(&mut self) -> Result<Conn, NetError>;
+    fn udp_send(&mut self, sock: Conn, to: IpAddr, port: u16, data: &[u8]) -> Result<(), NetError>;
+    /// One datagram and who sent it; `WouldBlock` when none is waiting.
+    fn udp_recv(&mut self, sock: Conn, buf: &mut [u8]) -> Result<(usize, IpAddr), NetError>;
 
     /// A store file (`config.json`, `devices.json`, ...), if it exists.
     fn read_file(&mut self, name: &str) -> Option<Vec<u8>>;

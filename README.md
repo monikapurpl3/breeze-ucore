@@ -41,8 +41,10 @@ Breeze Core a step above the vendor's platform:
 
 **In development; nothing released yet.** Milestone 1 is done: the protocol,
 units, state, control and capabilities, on an ordinary computer, matching
-Breeze Core 4.3.2 under the differential test (a 338 KB build). Pairing,
-timers, programs and the live stream come next, then the ESP32-S3.
+Breeze Core 4.3.2 under the differential test (a 338 KB build). Of milestone
+2, pairing (both auth versions) and the configuration routes (adding units by
+address, renaming, removing) are done; timers, programs and the live stream
+come next, then the ESP32-S3.
 [DESIGN.md](DESIGN.md) has the plan, the milestones and the reasoning.
 
 ## Versions
@@ -66,6 +68,11 @@ Core binary and breeze-mock:
 BREEZE_CORE_BIN=/path/to/breeze-core BREEZE_MOCK_BIN=/path/to/breeze-mock \
   cargo test --workspace --release
 ```
+
+Adding a unit by address probes it, and Breeze Core probes private addresses
+only, so that comparison (`tests/add_by_address.rs`) needs breeze-mock's dummy
+network: Linux with `CAP_NET_ADMIN`, a container being enough. It is skipped
+elsewhere; its header says how to run it.
 
 ## Honest limits
 
