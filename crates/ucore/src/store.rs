@@ -60,6 +60,12 @@ pub struct DevicesDoc {
     pub devices: Vec<DeviceRecord>,
 }
 
+/// A store file's bytes, as Breeze Core writes them: two-space indent, no
+/// trailing newline, floats in their shortest round-tripping form.
+pub fn to_json<T: Serialize>(value: &T) -> Vec<u8> {
+    serde_json::to_vec_pretty(value).unwrap_or_default()
+}
+
 /// Hex to bytes; `None` for anything that is not an even run of hex digits.
 pub fn unhex(s: &str) -> Option<Vec<u8>> {
     if s.len() % 2 != 0 {

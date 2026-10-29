@@ -16,17 +16,35 @@ pub const MAX_CLIENTS: usize = 4;
 /// A client that sends nothing for this long is dropped.
 const CLIENT_IDLE_MS: u64 = 30_000;
 
+/// Breeze Core's settings that μcore keeps, with Breeze Core's defaults.
 #[derive(Debug, Clone)]
 pub struct Settings {
     pub timing: Timing,
+    /// `AC_MIN_AUTH_VERSION`: devices below it get 426.
     pub min_auth_version: u8,
+    /// `AC_BEHIND_PROXY`: trust `X-Forwarded-For` for the LAN rule.
+    pub behind_proxy: bool,
+    /// `AC_CODE_TTL`, seconds a pairing code lives.
+    pub code_ttl: u64,
+    /// `AC_TOKEN_TTL_DAYS`; 0 or less never expires.
+    pub token_ttl_days: i64,
+    /// `AC_AUTH_SKEW_SECONDS`: how far a signed request's clock may be off.
+    pub auth_skew: u64,
     /// The build's commit, for `/api/version`.
     pub commit: &'static str,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { timing: Timing::default(), min_auth_version: 1, commit: option_env!("UCORE_COMMIT").unwrap_or("unknown") }
+        Self {
+            timing: Timing::default(),
+            min_auth_version: 1,
+            behind_proxy: false,
+            code_ttl: 60,
+            token_ttl_days: 3650,
+            auth_skew: 60,
+            commit: option_env!("UCORE_COMMIT").unwrap_or("unknown"),
+        }
     }
 }
 
@@ -58,6 +76,8 @@ pub struct Core {
     units: Vec<Unit>,
     clients: Vec<Client>,
     next_req: ReqId,
+    enrollment: auth::Enrollment,
+    nonces: auth::Nonces,
 }
 
 impl Core {
@@ -66,7 +86,8 @@ impl Core {
     /// easier to put right than one that restarts forever.
     pub fn new(p: &mut impl Platform, settings: Settings) -> Self {
         fn load<T: serde::de::DeserializeOwned + Default>(p: &mut impl Platform, name: &str) -> T {
-            match p.read_file(name).map(|b| serde_json::from_slice(&b)) {
+            let bytes = p.read_file(name).filter(|b| !b.iter().all(u8::is_ascii_whitespace));
+            match bytes.map(|b| serde_json::from_slice(&b)) {
                 Some(Ok(v)) => v,
                 Some(Err(e)) => {
                     p.log(&alloc::format!("{name}: {e}; starting without it"));
@@ -84,7 +105,9 @@ impl Core {
                 Unit::new(u.id as u64, u.name.clone(), u.ip.clone(), u.port, u.token.as_deref(), u.key.as_deref(), settings.timing)
             })
             .collect();
-        Self { settings, config, devices, units, clients: Vec::new(), next_req: 1 }
+        let enrollment = auth::Enrollment::new(settings.code_ttl, settings.token_ttl_days);
+        let nonces = auth::Nonces::new(settings.auth_skew);
+        Self { settings, config, devices, units, clients: Vec::new(), next_req: 1, enrollment, nonces }
     }
 
     fn req(&mut self) -> ReqId {
@@ -165,7 +188,7 @@ impl Core {
     }
 
     /// A response now, or the unit work it is waiting for.
-    fn dispatch(&mut self, r: &http::Request, _peer: IpAddr, p: &mut impl Platform) -> Result<Response, Pending> {
+    fn dispatch(&mut self, r: &http::Request, peer: IpAddr, p: &mut impl Platform) -> Result<Response, Pending> {
         let (guard, route) = match api::resolve(&r.method, &r.path) {
             Resolved::Route(g, route) => (g, route),
             Resolved::MethodNotAllowed(allow) => {
@@ -173,17 +196,48 @@ impl Core {
             }
             Resolved::NotFound => return Ok(Response::detail(404, "Not Found")),
         };
+        // The API key first, always: the cheap check, and the one that keeps
+        // strangers away from the device store.
         if guard != Guard::Open {
             if let Err(rejection) = auth::check_api_key(r.header("x-api-key"), self.config.api_key.as_deref()) {
                 return Ok(rejection);
             }
         }
-        if guard == Guard::Full {
-            let now = p.unix_ms().map_or(0.0, |ms| ms as f64 / 1000.0);
-            let token = r.header("authorization").and_then(auth::bearer);
-            if let Err(rejection) = auth::check_v1(&self.devices, token, now) {
-                return Ok(rejection);
+        let now = p.unix_ms().map_or(0.0, |ms| ms as f64 / 1000.0);
+        if guard == Guard::AdminLan {
+            let ip = auth::client_ip(Some(peer), r.header("x-forwarded-for"), self.settings.behind_proxy);
+            if !auth::is_private_ip(ip) {
+                // 403, not 401: the credential was fine, the place was not.
+                return Ok(Response::detail(403, "this admin action must come from the local network"));
             }
+        }
+        let mut device: Option<String> = None;
+        if guard == Guard::Full {
+            let presented = auth::Presented {
+                bearer: r.header("authorization").and_then(auth::bearer),
+                auth_version: r.header("x-breeze-auth-version"),
+                key_id: r.header("x-breeze-key-id"),
+                timestamp: r.header("x-breeze-timestamp"),
+                nonce: r.header("x-breeze-nonce"),
+                signature: r.header("x-breeze-signature"),
+                method: &r.method,
+                path: &r.target,
+                body: &r.body,
+            };
+            match auth::verify_device(&self.devices, &presented, &mut self.nonces, now, self.settings.min_auth_version) {
+                auth::Decision::Allow(token_id) => {
+                    // In memory only, as Breeze Core: a store write on every
+                    // request would turn each read of a thermostat into one.
+                    if let Some(d) = self.devices.devices.iter_mut().find(|d| d.token_id == token_id) {
+                        d.last_used = Some(now);
+                    }
+                    device = Some(token_id);
+                }
+                auth::Decision::Reject(rejection) => return Ok(rejection),
+            }
+        }
+        if let Some(response) = self.auth_route(route, r, device.as_deref(), now, p) {
+            return Ok(response);
         }
         let unit_of = |units: &[Unit]| {
             let id: u64 = api::unit_segment(&r.path).parse().ok()?;
@@ -247,7 +301,118 @@ impl Core {
                 self.units[unit].control(req, request.change());
                 Err(Pending::Control { unit, req, request })
             }
+            // Answered by auth_route above.
+            _ => Ok(Response::detail(404, "Not Found")),
         }
+    }
+
+    fn save_devices(&self, p: &mut impl Platform) -> Result<(), Response> {
+        p.write_file("devices.json", &crate::store::to_json(&self.devices), true)
+            .map_err(|e| Response::detail(500, &alloc::format!("cannot write the device store: {e}")))
+    }
+
+    /// Pairing and the paired: `None` for any other route.
+    fn auth_route(&mut self, route: Route, r: &http::Request, device: Option<&str>, now: f64, p: &mut impl Platform) -> Option<Response> {
+        Some(match route {
+            Route::EnrollStart => {
+                let request: api::StartRequest = match serde_json::from_slice(&r.body) {
+                    Ok(v) => v,
+                    Err(_) if r.body.is_empty() => api::StartRequest { label: String::new(), auth_version: 1, public_key: None },
+                    Err(e) => return Some(Response::detail(422, &alloc::format!("invalid enrolment request: {e}"))),
+                };
+                match self.enrollment.start(p, &request.label, request.auth_version, request.public_key.as_deref(), now) {
+                    Ok(s) => Response::json(
+                        200,
+                        &api::Started { session_id: &s.session_id, user_code: &s.user_code, expires_in: s.expires_in },
+                    ),
+                    Err(e @ auth::EnrollError::Full) => Response::detail(429, &alloc::string::ToString::to_string(&e)),
+                    Err(e) => Response::detail(422, &alloc::string::ToString::to_string(&e)),
+                }
+            }
+            Route::EnrollApprove => {
+                let request: api::ApproveRequest = match serde_json::from_slice(&r.body) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Response::detail(422, &alloc::format!("invalid approval request: {e}"))),
+                };
+                let Some(record) = self.enrollment.approve(p, &request.code, now) else {
+                    return Some(Response::detail(404, "no pending enrolment matches that code"));
+                };
+                let body = Response::json(200, &api::Approved { token_id: &record.token_id, label: &record.label });
+                self.devices.devices.push(record);
+                match self.save_devices(p) {
+                    Ok(()) => body,
+                    Err(e) => e,
+                }
+            }
+            Route::EnrollPoll => {
+                let request: api::PollRequest = match serde_json::from_slice(&r.body) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Response::detail(422, &alloc::format!("invalid poll request: {e}"))),
+                };
+                match self.enrollment.poll(&request.session_id, now) {
+                    auth::Poll::Approved(rec, token) => Response::json(
+                        200,
+                        &api::Collected {
+                            status: "approved",
+                            token_id: &rec.token_id,
+                            label: &rec.label,
+                            auth_version: rec.auth_version,
+                            expires_at: rec.expires_at,
+                            device_token: token.as_deref(),
+                        },
+                    ),
+                    auth::Poll::Pending => Response::json(200, &api::Status { status: "pending" }),
+                    auth::Poll::Unknown => Response::json(200, &api::Status { status: "unknown" }),
+                }
+            }
+            Route::Devices => {
+                let list: Vec<api::DeviceView> = self.devices.devices.iter().map(api::DeviceView::from).collect();
+                Response::json(200, &list)
+            }
+            Route::RevokeDevice => {
+                let token_id = r.path.strip_prefix("/api/auth/devices/").unwrap_or_default();
+                let before = self.devices.devices.len();
+                self.devices.devices.retain(|d| d.token_id != token_id);
+                if self.devices.devices.len() == before {
+                    return Some(Response::detail(404, "no such device"));
+                }
+                match self.save_devices(p) {
+                    Ok(()) => Response { status: 204, body: Vec::new(), extra: Vec::new() },
+                    Err(e) => e,
+                }
+            }
+            Route::Whoami => match self.devices.devices.iter().find(|d| Some(d.token_id.as_str()) == device) {
+                Some(d) => Response::json(200, &api::DeviceView::from(d)),
+                None => Response::detail(404, "device not found"),
+            },
+            Route::Upgrade => {
+                let Some(token_id) = device else { return Some(Response::detail(401, "no authenticated device to upgrade")) };
+                let request: api::UpgradeRequest = match serde_json::from_slice(&r.body) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Response::detail(422, &alloc::format!("invalid upgrade request: {e}"))),
+                };
+                if request.public_key.len() > 128 || !auth::public_key_is_valid(&request.public_key) {
+                    return Some(Response::detail(400, "invalid Ed25519 public_key"));
+                }
+                let Some(i) = self.devices.devices.iter().position(|d| d.token_id == token_id) else {
+                    return Some(Response::detail(404, "device not found"));
+                };
+                let previous = self.devices.devices[i].clone();
+                let d = &mut self.devices.devices[i];
+                d.auth_version = 2;
+                d.public_key = Some(request.public_key);
+                d.token_hash = None;
+                match self.save_devices(p) {
+                    Ok(()) => Response::json(200, &api::Upgraded { token_id, auth_version: 2 }),
+                    Err(e) => {
+                        // Nothing changes unless the store does.
+                        self.devices.devices[i] = previous;
+                        e
+                    }
+                }
+            }
+            _ => return None,
+        })
     }
 
     /// A unit finished something a client is waiting for.

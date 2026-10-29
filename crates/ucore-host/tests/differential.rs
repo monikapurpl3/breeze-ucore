@@ -135,6 +135,53 @@ fn steady(v: &Value) -> Value {
     v
 }
 
+fn compare_exact(failures: &mut Vec<String>, real: u16, ucore: u16, method: &str, path: &str, headers: &[(&str, &str)], body: &str) {
+    let r = call(real, method, path, headers, body);
+    let u = call(ucore, method, path, headers, body);
+    if (r.status, r.comparable_headers(), &r.body) != (u.status, u.comparable_headers(), &u.body) {
+        failures.push(format!(
+            "{method} {path} {body}\n   real  {} {}\n   ucore {} {}",
+            r.status,
+            String::from_utf8_lossy(&r.body),
+            u.status,
+            String::from_utf8_lossy(&u.body)
+        ));
+    }
+}
+
+fn b64(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// Start, approve from here (the LAN), poll: the three answers.
+fn pair(port: u16, start: &str) -> Vec<Value> {
+    let key = [("X-API-Key", KEY)];
+    let s = call(port, "POST", "/api/auth/enroll/start", &key, start).json();
+    let code = s["user_code"].as_str().unwrap_or_else(|| panic!("start on {port}: {s}"));
+    let a = call(port, "POST", "/api/auth/enroll/approve", &key, &format!(r#"{{"code": "{}"}}"#, code.to_lowercase())).json();
+    let p = call(port, "POST", "/api/auth/enroll/poll", &key, &format!(r#"{{"session_id": "{}"}}"#, s["session_id"].as_str().unwrap())).json();
+    assert_eq!(p["status"], "approved", "poll on {port}: {p}");
+    vec![s, a, p]
+}
+
+/// A v2 request: Ed25519 over Breeze Core's canonical string.
+#[allow(clippy::too_many_arguments)]
+fn signed(port: u16, key: &ed25519_dalek::SigningKey, key_id: &str, method: &str, path: &str, body: &str, ts: &str, nonce: &str) -> Answer {
+    use ed25519_dalek::Signer;
+    let canonical = ucore::auth::canonical(method, path, ts, nonce, body.as_bytes());
+    let sig = b64(&key.sign(&canonical).to_bytes());
+    let headers = [
+        ("X-API-Key", KEY),
+        ("X-Breeze-Auth-Version", "2"),
+        ("X-Breeze-Key-Id", key_id),
+        ("X-Breeze-Timestamp", ts),
+        ("X-Breeze-Nonce", nonce),
+        ("X-Breeze-Signature", sig.as_str()),
+    ];
+    call(port, method, path, &headers, body)
+}
+
 fn bins() -> Option<(PathBuf, PathBuf)> {
     let core = std::env::var_os("BREEZE_CORE_BIN").map(PathBuf::from)?;
     let mock = std::env::var_os("BREEZE_MOCK_BIN").map(PathBuf::from)?;
@@ -341,6 +388,115 @@ fn ucore_answers_as_breeze_core_does() {
     assert_eq!((r["units"].clone(), r["min_auth_version"].clone()), (u["units"].clone(), u["min_auth_version"].clone()));
     for f in u["features"].as_array().unwrap() {
         assert!(r["features"].as_array().unwrap().contains(f), "μcore advertises {f}, which Breeze Core does not");
+    }
+
+    // ------------------------------------------------------ pairing and auth
+    let key = [("X-API-Key", KEY)];
+    for (method, path, body) in [
+        ("POST", "/api/auth/enroll/start", "nope"),
+        ("POST", "/api/auth/enroll/start", r#"{"auth_version": 2, "public_key": "bad"}"#),
+        ("POST", "/api/auth/enroll/approve", "nope"),
+        ("POST", "/api/auth/enroll/approve", r#"{"code": "ZZZZ-ZZZZ"}"#),
+        ("POST", "/api/auth/enroll/poll", "nope"),
+        ("POST", "/api/auth/enroll/poll", r#"{"session_id": "nope"}"#),
+        ("DELETE", "/api/auth/devices/nope", ""),
+        ("GET", "/api/auth/devices/nope", ""),
+        ("GET", "/api/auth/enroll/start", ""),
+    ] {
+        compare_exact(&mut failures, real, ucore, method, path, &key, body);
+    }
+    for body in ["{}", r#"{"public_key": "bad"}"#] {
+        compare_exact(&mut failures, real, ucore, "POST", "/api/auth/upgrade", &AUTH, body);
+    }
+    let who = |port| {
+        let mut v = call(port, "GET", "/api/auth/whoami", &AUTH, "").json();
+        v.as_object_mut().unwrap().remove("last_used");
+        v
+    };
+    if who(real) != who(ucore) {
+        failures.push(format!("whoami\n   real  {}\n   ucore {}", who(real), who(ucore)));
+    }
+
+    // The whole of pairing, on each: v1 (a token handed over once), v2 (only
+    // the public key kept, then signed requests).
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+    let public = b64(signing.verifying_key().as_bytes());
+    let mut paired = Vec::new();
+    for port in [real, ucore] {
+        let v1 = pair(port, r#"{"label": "phone"}"#);
+        let v2 = pair(port, &format!(r#"{{"label": "signed", "auth_version": 2, "public_key": "{public}"}}"#));
+        let up = pair(port, r#"{"label": "to-upgrade"}"#);
+        paired.push((v1, v2, up));
+    }
+    let shapes = |i: usize| paired.iter().map(|p| [&p.0, &p.1, &p.2][i].iter().map(shape).collect::<Vec<_>>()).collect::<Vec<_>>();
+    for i in 0..3 {
+        let s = shapes(i);
+        if s[0] != s[1] {
+            failures.push(format!("pairing {i}: shapes differ\n   real  {:?}\n   ucore {:?}", s[0], s[1]));
+        }
+    }
+    for (port, (v1, v2, up)) in [real, ucore].into_iter().zip(&paired) {
+        let token = v1[2]["device_token"].as_str().unwrap();
+        let bearer = format!("Bearer {token}");
+        assert_eq!(call(port, "GET", "/api/units", &[("X-API-Key", KEY), ("Authorization", &bearer)], "").status, 200, "v1 on {port}");
+        assert!(v2[2].get("device_token").is_none(), "v2 hands over no secret: {}", v2[2]);
+        let key_id = v2[2]["token_id"].as_str().unwrap();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs().to_string();
+        let ok = signed(port, &signing, key_id, "GET", "/api/units?x=1", "", &now, &format!("n-{port}-1"));
+        assert_eq!(ok.status, 200, "v2 on {port}: {}", String::from_utf8_lossy(&ok.body));
+        // The upgrade: from then on the old bearer token is nobody's.
+        let up_token = format!("Bearer {}", up[2]["device_token"].as_str().unwrap());
+        let up_auth = [("X-API-Key", KEY), ("Authorization", up_token.as_str())];
+        let r = call(port, "POST", "/api/auth/upgrade", &up_auth, &format!(r#"{{"public_key": "{public}"}}"#));
+        assert_eq!((r.status, r.json()["auth_version"].clone()), (200, json!(2)), "upgrade on {port}");
+        assert_eq!(call(port, "GET", "/api/units", &up_auth, "").status, 401, "upgraded token on {port}");
+    }
+    // Rejections of signed requests, byte for byte (each server with its own
+    // device id, so the ids are put back the same before comparing).
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs().to_string();
+    let reject = |port: u16, i: usize, case: &str| {
+        let key_id = paired[i].1[2]["token_id"].as_str().unwrap();
+        let a = match case {
+            "replay" => signed(port, &signing, key_id, "GET", "/api/units?x=1", "", &now, &format!("n-{port}-1")),
+            "bad-signature" => signed(port, &ed25519_dalek::SigningKey::from_bytes(&[8u8; 32]), key_id, "GET", "/api/units", "", &now, "n2"),
+            "incomplete" => call(port, "GET", "/api/units", &[("X-API-Key", KEY), ("X-Breeze-Auth-Version", "2"), ("X-Breeze-Key-Id", key_id)], ""),
+            "unknown-key" => signed(port, &signing, "nobody", "GET", "/api/units", "", &now, "n3"),
+            _ => {
+                let mut a = signed(port, &signing, key_id, "GET", "/api/units", "", "1000", "n4");
+                let mut v = a.json();
+                v["detail"].as_object_mut().unwrap().remove("server_time");
+                a.body = serde_json::to_vec(&v).unwrap();
+                a
+            }
+        };
+        (a.status, a.comparable_headers(), String::from_utf8_lossy(&a.body).into_owned())
+    };
+    // A replayed nonce, a key that is not this device's, missing headers, an
+    // unknown key id, a clock 50 years off.
+    for case in ["replay", "bad-signature", "incomplete", "unknown-key", "clock-skew"] {
+        let (r, u) = (reject(real, 0, case), reject(ucore, 1, case));
+        if r != u {
+            failures.push(format!("signed {case}\n   real  {r:?}\n   ucore {u:?}"));
+        }
+    }
+    let list = |port| call(port, "GET", "/api/auth/devices", &key, "").json();
+    if shape(&list(real)) != shape(&list(ucore)) {
+        failures.push(format!("devices\n   real  {}\n   ucore {}", list(real), list(ucore)));
+    }
+    for (port, i) in [(real, 0), (ucore, 1)] {
+        let id = paired[i].0[2]["token_id"].as_str().unwrap();
+        let r = call(port, "DELETE", &format!("/api/auth/devices/{id}"), &key, "");
+        assert_eq!((r.status, r.body.len()), (204, 0), "revoke on {port}");
+    }
+    // devices.json as Breeze Core writes it: the same lines with the values
+    // taken out, and no trailing newline.
+    let skeleton = |dir: &Path| {
+        let text = std::fs::read_to_string(dir.join("devices.json")).unwrap();
+        assert!(!text.ends_with('\n'), "{}: trailing newline", dir.display());
+        text.lines().map(|l| l.split_once(':').map_or(l, |(k, _)| k).to_string()).collect::<Vec<_>>()
+    };
+    if skeleton(&real_dir) != skeleton(&ucore_dir) {
+        failures.push(format!("devices.json\n   real  {:?}\n   ucore {:?}", skeleton(&real_dir), skeleton(&ucore_dir)));
     }
 
     assert!(failures.is_empty(), "{} difference(s):\n{}", failures.len(), failures.join("\n"));

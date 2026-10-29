@@ -120,8 +120,43 @@ impl Platform for Host {
         std::fs::read(self.dir.join(name)).ok()
     }
 
+    /// Breeze Core's way: a temporary file, its mode, then a rename over the
+    /// old one. config.json is 640 (the admin group reads it), the rest 600.
+    fn write_file(&mut self, name: &str, data: &[u8], private: bool) -> Result<(), String> {
+        let path = self.dir.join(name);
+        let tmp = path.with_extension("tmp");
+        let at = |p: &std::path::Path, e: std::io::Error| format!("{}: {e}", p.display());
+        std::fs::create_dir_all(&self.dir).map_err(|e| at(&self.dir, e))?;
+        std::fs::write(&tmp, data).map_err(|e| at(&tmp, e))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = if private { 0o600 } else { 0o640 };
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode)).map_err(|e| at(&tmp, e))?;
+        }
+        #[cfg(not(unix))]
+        let _ = private;
+        std::fs::rename(&tmp, &path).map_err(|e| at(&path, e))
+    }
+
     fn log(&mut self, line: &str) {
         eprintln!("{line}");
+    }
+}
+
+/// Breeze Core's environment variables for what μcore keeps.
+fn settings() -> ucore::Settings {
+    fn var<T: std::str::FromStr>(name: &str) -> Option<T> {
+        std::env::var(name).ok().and_then(|v| v.parse().ok())
+    }
+    let d = ucore::Settings::default();
+    ucore::Settings {
+        min_auth_version: var("AC_MIN_AUTH_VERSION").unwrap_or(d.min_auth_version),
+        behind_proxy: matches!(std::env::var("AC_BEHIND_PROXY").as_deref(), Ok("1" | "true" | "yes")),
+        code_ttl: var("AC_CODE_TTL").unwrap_or(d.code_ttl),
+        token_ttl_days: var("AC_TOKEN_TTL_DAYS").unwrap_or(d.token_ttl_days),
+        auth_skew: var("AC_AUTH_SKEW_SECONDS").unwrap_or(d.auth_skew),
+        ..d
     }
 }
 
@@ -130,7 +165,8 @@ fn main() {
         println!("breeze-ucore {}", ucore::product_version());
         return;
     }
-    let host = std::env::var("BREEZE_HOST").unwrap_or_else(|_| "0.0.0.0".into());
+    // Breeze Core's default: this machine only, until told otherwise.
+    let host = std::env::var("BREEZE_HOST").unwrap_or_else(|_| "127.0.0.1".into());
     let port = std::env::var("BREEZE_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8420u16);
     let dir = std::env::var_os("AC_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
     let listener = TcpListener::bind((host.as_str(), port)).unwrap_or_else(|e| {
@@ -139,7 +175,7 @@ fn main() {
     });
     listener.set_nonblocking(true).expect("a non-blocking listener");
     let mut platform = Host { start: Instant::now(), listener, next: 0, conns: HashMap::new(), dir };
-    let mut core = ucore::Core::new(&mut platform, ucore::Settings::default());
+    let mut core = ucore::Core::new(&mut platform, settings());
     eprintln!("{} listening on {host}:{port}", ucore::banner(&core));
     loop {
         let wait = core.poll(&mut platform);

@@ -61,5 +61,9 @@ pub trait Platform {
 
     /// A store file (`config.json`, `devices.json`, ...), if it exists.
     fn read_file(&mut self, name: &str) -> Option<Vec<u8>>;
+    /// Replace a store file whole, so a crash leaves the old one or the new
+    /// one and never half of either. `private` files are the owner's alone
+    /// (`config.json` is readable by the admin group, the rest are not).
+    fn write_file(&mut self, name: &str, data: &[u8], private: bool) -> Result<(), String>;
     fn log(&mut self, line: &str);
 }

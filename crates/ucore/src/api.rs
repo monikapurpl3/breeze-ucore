@@ -9,8 +9,16 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 /// What `/api/version` advertises: only what μcore has, in Breeze Core's order.
-pub const FEATURES: &[&str] = &["batch_state", "beep_control", "control_feedback", "unit_capabilities"];
-pub const AUTH_VERSIONS: &[u8] = &[1];
+pub const FEATURES: &[&str] = &[
+    "batch_state",
+    "beep_control",
+    "control_feedback",
+    "device_pairing",
+    "ed25519_auth",
+    "unit_capabilities",
+    "whoami",
+];
+pub const AUTH_VERSIONS: &[u8] = &[1, 2];
 
 /// Which guard a route sits behind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +29,9 @@ pub enum Guard {
     ApiKey,
     /// The API key and a paired device.
     Full,
+    /// The API key and a client on the LAN: approving a pairing, managing
+    /// devices. A leaked key must not be enough to gain control.
+    AdminLan,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +43,13 @@ pub enum Route {
     UnitState,
     Capabilities,
     Control,
+    EnrollStart,
+    EnrollPoll,
+    EnrollApprove,
+    Devices,
+    RevokeDevice,
+    Whoami,
+    Upgrade,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,16 +60,31 @@ pub enum Resolved {
     NotFound,
 }
 
-/// Breeze Core's routing, less what μcore leaves out (which is then simply not
-/// there: 404, as a release without the feature answers).
+/// Breeze Core's routing, in its order, less what μcore leaves out (which is
+/// then simply not there: 404, as a release without the feature answers).
+/// `None` marks a route of Breeze Core's that μcore has not built yet: known,
+/// so that another method gets Breeze Core's 405.
 pub fn resolve(method: &str, path: &str) -> Resolved {
+    use Guard::*;
     let fixed: &[(&str, &str, Guard, Option<Route>)] = &[
-        ("GET", "/api/health", Guard::Open, Some(Route::Health)),
-        ("GET", "/api/version", Guard::ApiKey, Some(Route::Version)),
-        ("GET", "/api/units", Guard::Full, Some(Route::Units)),
-        ("GET", "/api/units/state", Guard::Full, Some(Route::AllStates)),
-        // Known, so that another method is a 405; not built yet (milestone 2).
-        ("POST", "/api/units", Guard::Full, None),
+        ("GET", "/api/health", Open, Some(Route::Health)),
+        ("GET", "/api/version", ApiKey, Some(Route::Version)),
+        ("GET", "/api/units", Full, Some(Route::Units)),
+        ("GET", "/api/units/state", Full, Some(Route::AllStates)),
+        ("GET", "/api/config", Full, None),
+        ("POST", "/api/units", Full, None),
+        ("POST", "/api/auth/enroll/start", ApiKey, Some(Route::EnrollStart)),
+        ("POST", "/api/auth/enroll/poll", ApiKey, Some(Route::EnrollPoll)),
+        ("POST", "/api/auth/enroll/approve", AdminLan, Some(Route::EnrollApprove)),
+        ("GET", "/api/auth/devices", AdminLan, Some(Route::Devices)),
+        ("GET", "/api/auth/whoami", Full, Some(Route::Whoami)),
+        ("POST", "/api/auth/upgrade", Full, Some(Route::Upgrade)),
+        ("GET", "/api/timers/status", Full, None),
+        ("GET", "/api/timers", Full, None),
+        ("POST", "/api/timers", Full, None),
+        ("GET", "/api/programs/status", Full, None),
+        ("GET", "/api/programs", Full, None),
+        ("POST", "/api/programs", Full, None),
     ];
     if path == "/api/units/stream" || path == "/api/units/scan" {
         return Resolved::NotFound;
@@ -65,6 +98,12 @@ pub fn resolve(method: &str, path: &str) -> Resolved {
         if *p == path {
             return Resolved::MethodNotAllowed(m);
         }
+    }
+    if let Some(token_id) = path.strip_prefix("/api/auth/devices/") {
+        if token_id.is_empty() || token_id.contains('/') {
+            return Resolved::NotFound;
+        }
+        return if method == "DELETE" { Resolved::Route(AdminLan, Route::RevokeDevice) } else { Resolved::MethodNotAllowed("DELETE") };
     }
     let Some(rest) = path.strip_prefix("/api/units/") else { return Resolved::NotFound };
     let Some((_, tail)) = rest.split_once('/') else {
@@ -188,6 +227,97 @@ pub enum UnitView<'a> {
 pub struct Envelope<'a> {
     pub states: Vec<UnitView<'a>>,
     pub errors: Vec<UnitView<'a>>,
+}
+
+fn one() -> u8 {
+    1
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StartRequest {
+    #[serde(default)]
+    pub label: String,
+    #[serde(default = "one")]
+    pub auth_version: u8,
+    #[serde(default)]
+    pub public_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PollRequest {
+    #[serde(default)]
+    pub session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApproveRequest {
+    #[serde(default)]
+    pub code: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpgradeRequest {
+    pub public_key: String,
+}
+
+#[derive(Serialize)]
+pub struct Started<'a> {
+    pub session_id: &'a str,
+    pub user_code: &'a str,
+    pub expires_in: u64,
+}
+
+#[derive(Serialize)]
+pub struct Approved<'a> {
+    pub token_id: &'a str,
+    pub label: &'a str,
+}
+
+/// A collected pairing; `device_token` only for v1, which hands one over.
+#[derive(Serialize)]
+pub struct Collected<'a> {
+    pub status: &'static str,
+    pub token_id: &'a str,
+    pub label: &'a str,
+    pub auth_version: u8,
+    pub expires_at: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_token: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+pub struct Status {
+    pub status: &'static str,
+}
+
+/// A paired device as the API shows it: never its secret or key.
+#[derive(Serialize)]
+pub struct DeviceView<'a> {
+    pub token_id: &'a str,
+    pub label: &'a str,
+    pub auth_version: u8,
+    pub created_at: f64,
+    pub expires_at: Option<f64>,
+    pub last_used: Option<f64>,
+}
+
+impl<'a> From<&'a crate::store::DeviceRecord> for DeviceView<'a> {
+    fn from(d: &'a crate::store::DeviceRecord) -> Self {
+        Self {
+            token_id: &d.token_id,
+            label: &d.label,
+            auth_version: d.auth_version,
+            created_at: d.created_at,
+            expires_at: d.expires_at,
+            last_used: d.last_used,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct Upgraded<'a> {
+    pub token_id: &'a str,
+    pub auth_version: u8,
 }
 
 /// A control request, field for field Breeze Core's, so serde's own messages
