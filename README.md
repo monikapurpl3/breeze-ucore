@@ -1,12 +1,12 @@
 <div align="center">
 
-# Breeze μcore
+# Breeze μCore
 
-**Breeze Core, small enough for a microcontroller.**
+**Breeze μCore (read micro-core), small enough for a microcontroller.**
 
 The LAN-first control server for Midea air conditioners, rewritten for chips
-with a few hundred kilobytes of RAM — an ESP32-S3 first. The same API as
-[Breeze Core](https://github.com/monikapurpl3/breeze-core-native), so the
+with a few hundred kilobytes of RAM — an ESP32-S3 first. Based on
+[Breeze Core](https://github.com/monikapurpl3/breeze-core-native)'s API, so the
 Breeze app, breezectl and your scripts work with it unchanged; no web panel,
 no command line, nothing a microcontroller cannot carry.
 
