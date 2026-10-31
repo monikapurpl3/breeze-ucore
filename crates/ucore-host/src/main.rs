@@ -186,6 +186,7 @@ fn settings() -> ucore::Settings {
         auth_skew: var("AC_AUTH_SKEW_SECONDS").unwrap_or(d.auth_skew),
         timer_tick: var("AC_TIMER_TICK").unwrap_or(d.timer_tick),
         sched_tick: var("AC_SCHED_TICK").unwrap_or(d.sched_tick),
+        stream_tick: var("AC_STREAM_TICK").unwrap_or(d.stream_tick),
         ..d
     }
 }

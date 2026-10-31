@@ -266,6 +266,63 @@ fn check_sleep(t: &Value, minutes: i64) {
     assert!((minutes * 60 - 5..=minutes * 60).contains(&left), "{t}");
 }
 
+/// An open event stream: its status, header lines in order, and a reader for
+/// its chunks.
+struct EventStream {
+    status: u16,
+    head: Vec<String>,
+    reader: BufReader<TcpStream>,
+}
+
+fn open_stream(port: u16) -> EventStream {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    let auth: String = AUTH.iter().map(|(n, v)| format!("{n}: {v}\r\n")).collect();
+    s.write_all(format!("GET /api/units/stream HTTP/1.1\r\nHost: x\r\nAccept: text/event-stream\r\n{auth}\r\n").as_bytes()).unwrap();
+    let mut reader = BufReader::new(s);
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    let status = line.split(' ').nth(1).unwrap().parse().unwrap();
+    let mut head = Vec::new();
+    loop {
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        let l = line.trim_end();
+        if l.is_empty() {
+            break;
+        }
+        head.push(l.to_string());
+    }
+    EventStream { status, head, reader }
+}
+
+impl EventStream {
+    /// The next chunk's text; `None` when the stream ends or stalls.
+    fn chunk(&mut self) -> Option<String> {
+        let mut size = String::new();
+        self.reader.read_line(&mut size).ok()?;
+        let n = usize::from_str_radix(size.trim(), 16).ok()?;
+        let mut payload = vec![0u8; n + 2];
+        self.reader.read_exact(&mut payload).ok()?;
+        payload.truncate(n);
+        String::from_utf8(payload).ok()
+    }
+
+    /// The next state event's data, if one comes before `deadline`
+    /// (keepalives keep a stalled stream's reads from ever timing out).
+    fn state(&mut self, deadline: Instant) -> Option<Value> {
+        loop {
+            if Instant::now() > deadline {
+                return None;
+            }
+            let c = self.chunk()?;
+            if let Some(rest) = c.strip_prefix("event: state\ndata: ") {
+                return serde_json::from_str(rest.trim_end()).ok();
+            }
+        }
+    }
+}
+
 /// A list of unit states, each without the room temperature.
 fn steady_list(v: &Value) -> Value {
     match v.as_array() {
@@ -360,6 +417,7 @@ fn ucore_answers_as_breeze_core_does() {
             .env("BREEZE_LOG", "0")
             .env("AC_TIMER_TICK", "3600")
             .env("AC_SCHED_TICK", "3600")
+            .env("AC_STREAM_TICK", "1")
             .stderr(Stdio::null())
             .spawn()
             .unwrap(),
@@ -371,6 +429,7 @@ fn ucore_answers_as_breeze_core_does() {
             .env("BREEZE_PORT", ucore.to_string())
             .env("AC_TIMER_TICK", "3600")
             .env("AC_SCHED_TICK", "3600")
+            .env("AC_STREAM_TICK", "1")
             .stderr(Stdio::null())
             .spawn()
             .unwrap(),
@@ -779,6 +838,59 @@ fn ucore_answers_as_breeze_core_does() {
     if rp != up {
         failures.push(format!("programs.json, emptied\n   real  {}\n   ucore {}", String::from_utf8_lossy(&rp), String::from_utf8_lossy(&up)));
     }
+
+    // ------------------------------------------------------------- the stream
+    compare_exact(&mut failures, real, ucore, "GET", "/api/units/stream", &[], "");
+    compare_exact(&mut failures, real, ucore, "GET", "/api/units/stream", &[("X-API-Key", KEY)], "");
+    compare_exact(&mut failures, real, ucore, "POST", "/api/units/stream", &AUTH, "");
+    let (mut rs, mut us) = (open_stream(real), open_stream(ucore));
+    if (rs.status, &rs.head) != (us.status, &us.head) {
+        failures.push(format!("the stream's head\n   real  {} {:?}\n   ucore {} {:?}", rs.status, rs.head, us.status, us.head));
+    }
+    assert_eq!(us.chunk().as_deref(), Some(": connected\n\n"));
+    assert_eq!(rs.chunk().as_deref(), Some(": connected\n\n"));
+    // Every unit once, as each server first reads it.
+    let first = |es: &mut EventStream| {
+        let deadline = Instant::now() + Duration::from_secs(40);
+        let mut seen = std::collections::BTreeMap::new();
+        while seen.len() < ids.len() {
+            let Some(v) = es.state(deadline) else { break };
+            seen.entry(v["id"].as_str().unwrap_or("").to_string()).or_insert(v);
+        }
+        seen
+    };
+    let (rf, uf) = (first(&mut rs), first(&mut us));
+    for id in ids {
+        let (r, u) = (rf.get(id).map(steady), uf.get(id).map(steady));
+        if r != u || r.is_none() {
+            failures.push(format!("the stream's first state of {id}\n   real  {r:?}\n   ucore {u:?}"));
+        }
+    }
+    // A change made through one server reaches both streams.
+    call(real, "POST", &format!("/api/units/{alpha}/control"), &AUTH, r#"{"power_state": true, "operational_mode": "COOL", "target_temperature": 26.5}"#);
+    let until = Instant::now() + Duration::from_secs(40);
+    let changed = |es: &mut EventStream| loop {
+        match es.state(until) {
+            Some(v) if v["id"].as_str() == Some(alpha.trim_matches('"')) && v["target_temperature"] == json!(26.5) => break Some(v),
+            Some(_) => continue,
+            None => break None,
+        }
+    };
+    let (rc, uc) = (changed(&mut rs), changed(&mut us));
+    if rc.as_ref().map(steady) != uc.as_ref().map(steady) || uc.is_none() {
+        failures.push(format!("the stream after a change\n   real  {rc:?}\n   ucore {uc:?}"));
+    }
+    // μCore's own ceiling: two streams, then Breeze Core's refusal for one too many.
+    let second = open_stream(ucore);
+    assert_eq!(second.status, 200);
+    // Its head only: a stream accepted here would never end.
+    let mut third = open_stream(ucore);
+    let mut body = String::new();
+    if third.status == 503 {
+        third.reader.read_to_string(&mut body).unwrap();
+    }
+    assert_eq!((third.status, body.as_str()), (503, r#"{"detail":"too many open streams"}"#), "{:?}", third.head);
+    drop((rs, us, second));
 
     // ------------------------------------------------------- the configuration
     // Everything short of probing an address (which needs units on a private

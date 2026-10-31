@@ -24,6 +24,14 @@ const PROBE_LISTEN_MS: u64 = 3_000;
 pub const MAX_CLIENTS: usize = 4;
 /// A client that sends nothing for this long is dropped.
 const CLIENT_IDLE_MS: u64 = 30_000;
+/// Event streams open at once; the next is refused, as Breeze Core refuses
+/// its 65th.
+pub const MAX_STREAMS: usize = 2;
+/// A stream with this much unsent is stuck: further events are dropped for
+/// it rather than held, as Breeze Core drops them for a full queue.
+const STREAM_BACKLOG: usize = 16 * 1024;
+/// Quiet this long, a stream gets a keepalive comment.
+const KEEPALIVE_MS: u64 = 15_000;
 
 /// Breeze Core's settings that μCore keeps, with Breeze Core's defaults.
 #[derive(Debug, Clone)]
@@ -43,6 +51,9 @@ pub struct Settings {
     pub timer_tick: u64,
     /// `AC_SCHED_TICK`: seconds between passes over the programs (5 at least).
     pub sched_tick: u64,
+    /// `AC_STREAM_TICK`: seconds between walks over the units while a stream
+    /// is open (1 at least).
+    pub stream_tick: u64,
     /// The build's commit, for `/api/version`.
     pub commit: &'static str,
 }
@@ -58,6 +69,7 @@ impl Default for Settings {
             auth_skew: 60,
             timer_tick: 15,
             sched_tick: 30,
+            stream_tick: 5,
             commit: option_env!("UCORE_COMMIT").unwrap_or("unknown"),
         }
     }
@@ -75,6 +87,8 @@ enum Pending {
     /// A program applied now: one unit after another, as Breeze Core does,
     /// stopping at the first that fails.
     Apply(Box<Apply>),
+    /// `/api/units/stream`, accepted: the connection becomes a stream.
+    Stream,
 }
 
 struct Apply {
@@ -100,6 +114,7 @@ impl Pending {
             Pending::Batch { parts } => parts.iter().any(|(u, _, _)| *u == id),
             Pending::Probe(_) => false,
             Pending::Apply(a) => a.current.0 == id || a.rest.contains(&id),
+            Pending::Stream => false,
         }
     }
 }
@@ -108,6 +123,8 @@ enum Phase {
     Reading,
     Waiting(Pending),
     Writing { out: Vec<u8>, at: usize },
+    /// An event stream: never finished, written as events come.
+    Streaming { out: Vec<u8>, at: usize, quiet_since: u64 },
 }
 
 struct Client {
@@ -131,8 +148,22 @@ pub struct Core {
     runner: Runner,
     programs: ProgramsDoc,
     scheduler: Scheduler,
+    streamer: Streamer,
     /// Units' work a timer or a program asked for: nobody waits on it.
     jobs: Vec<Job>,
+}
+
+/// The event streams' poller, Breeze Core's: idle while nobody listens, then
+/// a walk over the units one after another every tick, broadcasting a unit
+/// only when it changed.
+#[derive(Default)]
+struct Streamer {
+    next: u64,
+    /// The unit being read, the read, and the units after it.
+    walk: Option<(u64, ReqId, Vec<u64>)>,
+    /// Per unit: the last state sent, and the last state read (an
+    /// unreachable unit keeps its values, `online` false).
+    last: BTreeMap<u64, (Vec<u8>, Option<crate::proto::ac::State>)>,
 }
 
 struct Job {
@@ -145,6 +176,7 @@ enum JobKind {
     Timer,
     Schedule { name: String },
     Curve { program: String, name: String, temp: f64 },
+    StreamRead,
 }
 
 /// The scheduler's own bookkeeping, as Breeze Core keeps it.
@@ -197,7 +229,7 @@ impl Core {
         let units = config.units.iter().map(|u| unit_from(u, settings.timing)).collect();
         let enrollment = auth::Enrollment::new(settings.code_ttl, settings.token_ttl_days);
         let nonces = auth::Nonces::new(settings.auth_skew);
-        Self { settings, config, devices, units, clients: Vec::new(), next_req: 1, enrollment, nonces, timers, runner, programs, scheduler, jobs: Vec::new() }
+        Self { settings, config, devices, units, clients: Vec::new(), next_req: 1, enrollment, nonces, timers, runner, programs, scheduler, streamer: Streamer::default(), jobs: Vec::new() }
     }
 
     fn req(&mut self) -> ReqId {
@@ -216,6 +248,8 @@ impl Core {
         for i in 0..self.clients.len() {
             if matches!(self.clients[i].phase, Phase::Reading) {
                 self.read_client(i, p, now);
+            } else if matches!(self.clients[i].phase, Phase::Streaming { .. }) {
+                self.watch_stream(i, p, now);
             }
         }
         for u in 0..self.units.len() {
@@ -235,6 +269,17 @@ impl Core {
         if now >= self.scheduler.next {
             self.run_scheduler(p);
             self.scheduler.next = now + self.settings.sched_tick.max(5) * 1000;
+        }
+        // A unit removed or replaced mid-walk takes its read with it: go on.
+        if let Some((_, req, _)) = &self.streamer.walk {
+            if !self.jobs.iter().any(|j| j.req == *req) {
+                let (_, _, rest) = self.streamer.walk.take().expect("just seen");
+                self.stream_walk(rest, p, now);
+            }
+        }
+        if self.streamer.walk.is_none() && now >= self.streamer.next && self.streams() > 0 {
+            let order: Vec<u64> = self.units.iter().map(|u| u.id).collect();
+            self.stream_walk(order, p, now);
         }
         for i in 0..self.clients.len() {
             if matches!(self.clients[i].phase, Phase::Waiting(Pending::Probe(_))) {
@@ -285,6 +330,7 @@ impl Core {
                 let peer = self.clients[i].peer;
                 match self.dispatch(&request, peer, p) {
                     Ok(response) => self.answer(i, response),
+                    Err(Pending::Stream) => self.open_stream(i, now),
                     Err(pending) => self.clients[i].phase = Phase::Waiting(pending),
                 }
             }
@@ -407,6 +453,8 @@ impl Core {
                     None => Err(Pending::Caps { unit: self.units[u].id, req }),
                 }
             }
+            Route::Stream if self.streams() >= MAX_STREAMS => Ok(Response::detail(503, "too many open streams")),
+            Route::Stream => Err(Pending::Stream),
             Route::Control => {
                 let Some(unit) = unit_of(&self.units) else { return Ok(api::unknown_unit(&r.path)) };
                 let request: ControlRequest = match serde_json::from_slice(&r.body) {
@@ -729,6 +777,12 @@ impl Core {
 
     /// A timer's or a program's work on a unit came back.
     fn count(&mut self, job: Job, outcome: Outcome, p: &mut impl Platform) {
+        if matches!(job.kind, JobKind::StreamRead) {
+            if let Outcome::State(result) = outcome {
+                self.stream_read(job.unit, result, p);
+            }
+            return;
+        }
         let Outcome::Control(result) = outcome else { return };
         let unit = job.unit;
         match (job.kind, result) {
@@ -746,7 +800,129 @@ impl Core {
                 p.log(&alloc::format!("curve '{name}' -> unit {unit} set {temp:.1}"));
             }
             (JobKind::Curve { name, .. }, Err(e)) => p.log(&alloc::format!("curve '{name}' -> unit {unit} failed: {e}")),
+            (JobKind::StreamRead, _) => {}
         }
+    }
+
+    fn streams(&self) -> usize {
+        self.clients.iter().filter(|c| matches!(c.phase, Phase::Streaming { .. })).count()
+    }
+
+    /// The stream's headers (Breeze Core writes them by hand, so do we, in
+    /// its order), an immediate comment so the client sees it is live, and
+    /// the last-known state of every unit, in configuration order.
+    fn open_stream(&mut self, i: usize, now: u64) {
+        let mut out = alloc::string::String::from(concat!(
+            "HTTP/1.1 200 OK\r\n",
+            "Content-Type: text/event-stream\r\n",
+            "Transfer-Encoding: chunked\r\n",
+            "Cache-Control: no-cache, no-transform\r\n",
+            "X-Accel-Buffering: no\r\n",
+            "Connection: keep-alive\r\n",
+            "Content-Encoding: identity\r\n",
+        ));
+        for (n, v) in http::SECURITY_HEADERS {
+            out.push_str(n);
+            out.push_str(": ");
+            out.push_str(v);
+            out.push_str("\r\n");
+        }
+        out.push_str("\r\n");
+        let mut out = out.into_bytes();
+        out.extend_from_slice(&chunk(": connected\n\n"));
+        for u in &self.units {
+            if let Some((sent, _)) = self.streamer.last.get(&u.id) {
+                out.extend_from_slice(&chunk(&frame(sent)));
+            }
+        }
+        self.clients[i].phase = Phase::Streaming { out, at: 0, quiet_since: now };
+        // The poller was idle with nobody listening: it starts now, not a
+        // tick from now.
+        if self.streamer.walk.is_none() {
+            self.streamer.next = now;
+        }
+    }
+
+    /// A stream's client sends nothing after its request; a read that ends
+    /// means it has gone.
+    fn watch_stream(&mut self, i: usize, p: &mut impl Platform, _now: u64) {
+        let mut sink = [0u8; 64];
+        loop {
+            match p.recv(self.clients[i].conn, &mut sink) {
+                Ok(0) => {
+                    self.clients[i].phase = Phase::Writing { out: chunk_end(), at: 0 };
+                    return;
+                }
+                Ok(_) => {}
+                Err(e) if e.kind == NetKind::WouldBlock => return,
+                Err(_) => {
+                    self.clients[i].phase = Phase::Writing { out: Vec::new(), at: 0 };
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Read the next unit of a walk; at the end of the walk, rest a tick.
+    fn stream_walk(&mut self, mut rest: Vec<u64>, p: &mut impl Platform, now: u64) {
+        while !rest.is_empty() {
+            let unit = rest.remove(0);
+            if let Some(u) = self.units.iter().position(|x| x.id == unit) {
+                let req = self.req();
+                self.units[u].read(req);
+                self.jobs.push(Job { req, unit, kind: JobKind::StreamRead });
+                self.streamer.walk = Some((unit, req, rest));
+                return;
+            }
+        }
+        let _ = p;
+        self.streamer.walk = None;
+        self.streamer.next = now + self.settings.stream_tick.max(1) * 1000;
+    }
+
+    /// One unit read for the streams: send it on if it changed, then on to
+    /// the next.
+    fn stream_read(&mut self, unit: u64, result: Result<crate::proto::ac::State, crate::unit::DeviceError>, p: &mut impl Platform) {
+        if let Some(u) = self.units.iter().find(|x| x.id == unit) {
+            let previous = self.streamer.last.get(&unit).and_then(|(_, s)| s.clone());
+            let (state, bytes) = match result {
+                Ok(s) => {
+                    let bytes = serde_json::to_vec(&UnitState::of(u, &s)).unwrap_or_default();
+                    (Some(s), bytes)
+                }
+                // Last known values with `online` false; never seen, Breeze
+                // Core's placeholder.
+                Err(_) => {
+                    let view = match &previous {
+                        Some(s) => UnitState { online: false, ..UnitState::of(u, s) },
+                        None => placeholder(u),
+                    };
+                    (previous.clone(), serde_json::to_vec(&view).unwrap_or_default())
+                }
+            };
+            let changed = self.streamer.last.get(&unit).is_none_or(|(sent, _)| *sent != bytes);
+            if changed {
+                let event = chunk(&frame(&bytes));
+                for c in self.clients.iter_mut() {
+                    if let Phase::Streaming { out, at, quiet_since } = &mut c.phase {
+                        if out.len() - *at + event.len() <= STREAM_BACKLOG {
+                            out.extend_from_slice(&event);
+                            *quiet_since = p.now_ms();
+                        }
+                    }
+                }
+            }
+            self.streamer.last.insert(unit, (bytes, state));
+        }
+        let now = p.now_ms();
+        let rest = match self.streamer.walk.take() {
+            Some((current, _, rest)) if current == unit => rest,
+            other => {
+                self.streamer.walk = other;
+                return;
+            }
+        };
+        self.stream_walk(rest, p, now);
     }
 
     fn save_programs(&self, p: &mut impl Platform) -> Result<(), Response> {
@@ -952,7 +1128,7 @@ impl Core {
             None => match kind {
                 JobKind::Schedule { name } => p.log(&alloc::format!("schedule '{name}' -> unit {unit} failed: {NOT_A_UNIT}")),
                 JobKind::Curve { name, .. } => p.log(&alloc::format!("curve '{name}' -> unit {unit} failed: {NOT_A_UNIT}")),
-                JobKind::Timer => {}
+                JobKind::Timer | JobKind::StreamRead => {}
             },
         }
     }
@@ -1170,8 +1346,31 @@ impl Core {
                         }
                     }
                 }
+                Phase::Streaming { out, at, quiet_since } => {
+                    // The keepalive is how a client that has gone is found.
+                    if now.saturating_sub(*quiet_since) >= KEEPALIVE_MS {
+                        out.extend_from_slice(&chunk(": keepalive\n\n"));
+                        *quiet_since = now;
+                    }
+                    loop {
+                        if *at >= out.len() {
+                            out.clear();
+                            *at = 0;
+                            break false;
+                        }
+                        match p.send(c.conn, &out[*at..]) {
+                            Ok(0) => break false,
+                            Ok(n) => {
+                                *at += n;
+                                c.since = now;
+                            }
+                            Err(e) if e.kind == NetKind::WouldBlock => break false,
+                            Err(_) => break true,
+                        }
+                    }
+                }
                 _ => false,
-            } || now.saturating_sub(c.since) > CLIENT_IDLE_MS && !matches!(c.phase, Phase::Waiting(_));
+            } || now.saturating_sub(c.since) > CLIENT_IDLE_MS && !matches!(c.phase, Phase::Waiting(_) | Phase::Streaming { .. });
             if done {
                 p.close(c.conn);
                 self.clients.swap_remove(i);
@@ -1184,6 +1383,40 @@ impl Core {
 
 fn unit_from(u: &UnitConfig, timing: Timing) -> Unit {
     Unit::new(u.id as u64, u.name.clone(), u.ip.clone(), u.port, u.token.as_deref(), u.key.as_deref(), timing)
+}
+
+/// One SSE frame around a state.
+fn frame(data: &[u8]) -> alloc::string::String {
+    alloc::format!("event: state\ndata: {}\n\n", core::str::from_utf8(data).unwrap_or("{}"))
+}
+
+/// One HTTP chunk.
+fn chunk(payload: &str) -> Vec<u8> {
+    alloc::format!("{:x}\r\n{payload}\r\n", payload.len()).into_bytes()
+}
+
+fn chunk_end() -> Vec<u8> {
+    b"0\r\n\r\n".to_vec()
+}
+
+/// Breeze Core's stand-in for a unit never read: a plausible card, field for
+/// field.
+fn placeholder(u: &Unit) -> UnitState<'_> {
+    UnitState {
+        id: u.id.to_string(),
+        name: &u.name,
+        ip: &u.ip,
+        online: false,
+        power_state: false,
+        operational_mode: "AUTO",
+        target_temperature: 22.0,
+        indoor_temperature: None,
+        outdoor_temperature: None,
+        fan_speed: 102,
+        swing_mode: "OFF",
+        eco: false,
+        turbo: false,
+    }
 }
 
 /// What Breeze Core says of a unit id it does not have.

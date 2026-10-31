@@ -17,6 +17,7 @@ pub const FEATURES: &[&str] = &[
     "delete_unit",
     "device_pairing",
     "ed25519_auth",
+    "live_stream",
     "programs",
     "sleep_timer",
     "timer_at",
@@ -70,6 +71,8 @@ pub enum Route {
     ProgramUpdate,
     ProgramDelete,
     ProgramApply,
+    /// `/api/units/stream`: the connection becomes an event stream.
+    Stream,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,7 +109,11 @@ pub fn resolve(method: &str, path: &str) -> Resolved {
         ("GET", "/api/programs", Full, Some(Route::Programs)),
         ("POST", "/api/programs", Full, Some(Route::ProgramCreate)),
     ];
-    if path == "/api/units/stream" || path == "/api/units/scan" {
+    // Before the /{id} patterns, or "stream" reads as a unit id.
+    if path == "/api/units/stream" {
+        return if method == "GET" { Resolved::Route(Full, Route::Stream) } else { Resolved::MethodNotAllowed("GET") };
+    }
+    if path == "/api/units/scan" {
         return Resolved::NotFound;
     }
     for (m, p, g, r) in fixed {
@@ -558,6 +565,8 @@ mod tests {
         assert_eq!(resolve("GET", "/api/units/123/history"), Resolved::NotFound);
         assert_eq!(resolve("GET", "/api/system"), Resolved::NotFound);
         assert_eq!(resolve("GET", "/api/units/scan"), Resolved::NotFound);
+        assert_eq!(resolve("GET", "/api/units/stream"), Resolved::Route(Guard::Full, Route::Stream));
+        assert_eq!(resolve("POST", "/api/units/stream"), Resolved::MethodNotAllowed("GET"));
         assert_eq!(resolve("POST", "/api/timers"), Resolved::Route(Guard::Full, Route::TimerCreate));
         assert_eq!(resolve("PUT", "/api/timers"), Resolved::MethodNotAllowed("GET"));
         assert_eq!(resolve("GET", "/api/timers/status"), Resolved::Route(Guard::Full, Route::TimerStatus));
