@@ -45,8 +45,9 @@ Breeze Core 4.3.2 under the differential test (a 338 KB build). Of milestone
 2, pairing (both auth versions), the configuration routes (adding units by
 address, renaming, removing), timers (sleep timers and scheduled starts),
 programs (favourites, schedules and temperature curves, with the scheduler
-that runs them) and the live event stream are done: every route μCore keeps.
-Next, Breeze Core's own `diag` against it, then the ESP32-S3.
+that runs them) and the live event stream are done: every route μCore keeps,
+and Breeze Core's own `diag` passes against it as it does against Breeze Core
+(25 checks). Next, the ESP32-S3.
 [DESIGN.md](DESIGN.md) has the plan, the milestones and the reasoning.
 
 ## Versions
