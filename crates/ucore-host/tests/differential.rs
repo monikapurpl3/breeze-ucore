@@ -205,6 +205,71 @@ fn devices_json(dir: &Path) {
     std::fs::write(dir.join("devices.json"), serde_json::to_string_pretty(&doc).unwrap()).unwrap();
 }
 
+/// A timer's answer with what moves masked: ids, clock readings, and the
+/// minutes and seconds that depend on when it was asked. Key order is kept,
+/// so the masked text still has to match Breeze Core's byte for byte.
+fn mask(text: &str) -> String {
+    let b = text.as_bytes();
+    let mut out = String::new();
+    let mut i = 0;
+    let is_time = |w: &[u8]| {
+        w.len() == 19
+            && w.iter().enumerate().all(|(k, c)| match k {
+                4 | 7 => *c == b'-',
+                10 => *c == b'T',
+                13 | 16 => *c == b':',
+                _ => c.is_ascii_digit(),
+            })
+    };
+    while i < b.len() {
+        if i + 19 <= b.len() && is_time(&b[i..i + 19]) {
+            out.push_str("TIME");
+            i += 19;
+            continue;
+        }
+        let mut done = false;
+        for (key, hex) in [("\"id\":", true), ("\"seconds_remaining\":", false), ("\"minutes\":", false), ("\"runs\":", false)] {
+            if b[i..].starts_with(key.as_bytes()) {
+                out.push_str(key);
+                i += key.len();
+                while i < b.len() && b[i] == b' ' {
+                    out.push(' ');
+                    i += 1;
+                }
+                if hex && b.get(i) == Some(&b'"') && b.len() >= i + 14 && b[i + 1..i + 13].iter().all(u8::is_ascii_hexdigit) && b[i + 13] == b'"' {
+                    out.push_str("\"ID\"");
+                    i += 14;
+                } else if !hex {
+                    while i < b.len() && b[i].is_ascii_digit() {
+                        i += 1;
+                    }
+                    out.push('N');
+                }
+                done = true;
+                break;
+            }
+        }
+        if !done {
+            out.push(b[i] as char);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// What a sleep timer promises, checked on its own answer: the moment is
+/// the minutes after its creation, and the countdown starts there.
+fn check_sleep(t: &Value, minutes: i64) {
+    let at = |k: &str| chrono::NaiveDateTime::parse_from_str(t[k].as_str().unwrap(), "%Y-%m-%dT%H:%M:%S").unwrap();
+    assert_eq!((at("fires_at") - at("created_at")).num_minutes(), minutes, "{t}");
+    let left = t["seconds_remaining"].as_i64().unwrap();
+    assert!((minutes * 60 - 5..=minutes * 60).contains(&left), "{t}");
+}
+
+fn local_now() -> chrono::NaiveDateTime {
+    chrono::Local::now().naive_local()
+}
+
 #[test]
 fn ucore_answers_as_breeze_core_does() {
     let Some((core_bin, mock_bin)) = bins() else {
@@ -285,6 +350,7 @@ fn ucore_answers_as_breeze_core_does() {
             .env("BREEZE_HOST", "127.0.0.1")
             .env("BREEZE_PORT", real.to_string())
             .env("BREEZE_LOG", "0")
+            .env("AC_TIMER_TICK", "3600")
             .stderr(Stdio::null())
             .spawn()
             .unwrap(),
@@ -294,6 +360,7 @@ fn ucore_answers_as_breeze_core_does() {
             .env("AC_CONFIG_DIR", &ucore_dir)
             .env("BREEZE_HOST", "127.0.0.1")
             .env("BREEZE_PORT", ucore.to_string())
+            .env("AC_TIMER_TICK", "3600")
             .stderr(Stdio::null())
             .spawn()
             .unwrap(),
@@ -505,6 +572,89 @@ fn ucore_answers_as_breeze_core_does() {
         failures.push(format!("devices.json\n   real  {:?}\n   ucore {:?}", skeleton(&real_dir), skeleton(&ucore_dir)));
     }
 
+    // ------------------------------------------------------------- timers
+    // Refusals byte for byte; then real timers, compared with what moves
+    // masked, and checked for what they promise.
+    let many = format!(r#"{{"minutes": 30, "unit_ids": [{}]}}"#, vec![format!("\"{alpha}\""); 65].join(", "));
+    let refusals: Vec<(&str, String, String)> = vec![
+        ("GET", "/api/timers".into(), String::new()),
+        ("GET", "/api/timers?kind=all".into(), String::new()),
+        ("GET", "/api/timers?kind=both".into(), String::new()),
+        ("GET", "/api/timers?kind=st%61rt".into(), String::new()),
+        ("GET", "/api/timers/status".into(), String::new()),
+        ("PUT", "/api/timers".into(), String::new()),
+        ("GET", "/api/timers/abc123".into(), String::new()),
+        ("DELETE", "/api/timers/abc123".into(), String::new()),
+        ("DELETE", "/api/timers/".into(), String::new()),
+        ("DELETE", "/api/timers/a/b".into(), String::new()),
+        ("POST", "/api/timers".into(), "nope".into()),
+        ("POST", "/api/timers".into(), String::new()),
+        ("POST", "/api/timers".into(), "{}".into()),
+        ("POST", "/api/timers".into(), r#"{"minutes": 30, "at": "07:00"}"#.into()),
+        ("POST", "/api/timers".into(), r#"{"days": 2}"#.into()),
+        ("POST", "/api/timers".into(), r#"{"minutes": 30, "days": 1}"#.into()),
+        ("POST", "/api/timers".into(), r#"{"at": "07:00", "settings": {"eco": true}}"#.into()),
+        ("POST", "/api/timers".into(), r#"{"minutes": 0}"#.into()),
+        ("POST", "/api/timers".into(), r#"{"minutes": 1441}"#.into()),
+        ("POST", "/api/timers".into(), r#"{"minutes": -5}"#.into()),
+        ("POST", "/api/timers".into(), r#"{"minutes": 30, "settings": {"target_temperature": 99}}"#.into()),
+        ("POST", "/api/timers".into(), r#"{"minutes": 30, "settings": {"operational_mode": "WARP"}}"#.into()),
+        ("POST", "/api/timers".into(), r#"{"minutes": 30, "settings": {"swing_mode": "up"}}"#.into()),
+        ("POST", "/api/timers".into(), r#"{"minutes": 30, "unit_ids": ["999", "abc"]}"#.into()),
+        ("POST", "/api/timers".into(), many),
+        ("POST", "/api/timers".into(), r#"{"days": 31, "at": "07:00"}"#.into()),
+        ("POST", "/api/timers".into(), r#"{"days": 0, "at": "7.30"}"#.into()),
+        ("POST", "/api/timers".into(), r#"{"days": 0, "at": "00:00"}"#.into()),
+    ];
+    for (method, path, body) in &refusals {
+        compare_exact(&mut failures, real, ucore, method, path, &AUTH, body);
+    }
+    let mut created: Vec<(String, String, String)> = Vec::new();
+    for (body, minutes) in [
+        (format!(r#"{{"unit_ids": ["{alpha}"], "minutes": 45, "label": "bedtime"}}"#), Some(45)),
+        // Replaces the one above: one sleep timer per unit.
+        (format!(r#"{{"unit_ids": ["{alpha}"], "minutes": 30, "settings": {{"eco": true, "operational_mode": "cool", "target_temperature": 24}}}}"#), Some(30)),
+        (format!(r#"{{"unit_ids": ["{bravo}"], "days": 1, "at": "07:30", "label": "morning"}}"#), None),
+        (r#"{"minutes": 10}"#.to_string(), Some(10)),
+    ] {
+        let (r, u) = (call(real, "POST", "/api/timers", &AUTH, &body), call(ucore, "POST", "/api/timers", &AUTH, &body));
+        let (rt, ut) = (String::from_utf8_lossy(&r.body).into_owned(), String::from_utf8_lossy(&u.body).into_owned());
+        if (r.status, r.comparable_headers(), mask(&rt)) != (u.status, u.comparable_headers(), mask(&ut)) {
+            failures.push(format!("POST /api/timers {body}\n   real  {} {rt}\n   ucore {} {ut}", r.status, u.status));
+        }
+        if let Some(m) = minutes {
+            check_sleep(&u.json(), m);
+        }
+        created.push((r.json()["id"].as_str().unwrap_or("").into(), u.json()["id"].as_str().unwrap_or("").into(), body));
+    }
+    for path in ["/api/timers", "/api/timers?kind=start", "/api/timers?kind=all", "/api/timers/status"] {
+        let (r, u) = (call(real, "GET", path, &AUTH, ""), call(ucore, "GET", path, &AUTH, ""));
+        let (rt, ut) = (String::from_utf8_lossy(&r.body).into_owned(), String::from_utf8_lossy(&u.body).into_owned());
+        if (r.status, mask(&rt)) != (u.status, mask(&ut)) {
+            failures.push(format!("GET {path}\n   real  {} {rt}\n   ucore {} {ut}", r.status, u.status));
+        }
+    }
+    let listed = call(ucore, "GET", "/api/timers?kind=all", &AUTH, "").json();
+    let kinds: Vec<_> = listed.as_array().unwrap().iter().map(|t| (t["kind"].clone(), t["label"].clone())).collect();
+    assert_eq!(kinds, [(json!("sleep"), json!("")), (json!("start"), json!("morning")), (json!("sleep"), json!(""))], "{listed}");
+    let (rj, uj) = (std::fs::read_to_string(real_dir.join("timers.json")).unwrap(), std::fs::read_to_string(ucore_dir.join("timers.json")).unwrap());
+    if mask(&rj) != mask(&uj) {
+        failures.push(format!("timers.json\n   real  {rj}\n   ucore {uj}"));
+    }
+    // Cancelled, then gone: 204, then 404, and an empty store.
+    for (r_id, u_id, _) in &created[1..] {
+        for _ in 0..2 {
+            let (r, u) = (call(real, "DELETE", &format!("/api/timers/{r_id}"), &AUTH, ""), call(ucore, "DELETE", &format!("/api/timers/{u_id}"), &AUTH, ""));
+            if (r.status, r.comparable_headers(), &r.body) != (u.status, u.comparable_headers(), &u.body) {
+                failures.push(format!("DELETE /api/timers/{{id}}\n   real  {} {}\n   ucore {} {}", r.status, String::from_utf8_lossy(&r.body), u.status, String::from_utf8_lossy(&u.body)));
+            }
+        }
+    }
+    let (rj, uj) = (std::fs::read(real_dir.join("timers.json")).unwrap(), std::fs::read(ucore_dir.join("timers.json")).unwrap());
+    if rj != uj {
+        failures.push(format!("timers.json, emptied\n   real  {}\n   ucore {}", String::from_utf8_lossy(&rj), String::from_utf8_lossy(&uj)));
+    }
+
     // ------------------------------------------------------- the configuration
     // Everything short of probing an address (which needs units on a private
     // network: the Linux run does that). Last, since it changes the units.
@@ -542,6 +692,72 @@ fn ucore_answers_as_breeze_core_does() {
     let (rc, uc) = (std::fs::read(real_dir.join("config.json")).unwrap(), std::fs::read(ucore_dir.join("config.json")).unwrap());
     if rc != uc {
         failures.push(format!("config.json\n   real  {}\n   ucore {}", String::from_utf8_lossy(&rc), String::from_utf8_lossy(&uc)));
+    }
+
+    // ------------------------------------------------------------- firing
+    // Each server in turn, on the same units, from the same timers.json with
+    // a one-second tick: a due sleep timer fires, a start missed by more than
+    // its grace is dropped and does not, a timer for a unit that is not there
+    // is an error, a later one stays. What is left, and the counts, must agree.
+    let fire_cfg = std::fs::read(real_dir.join("config.json")).unwrap();
+    let mut results = Vec::new();
+    for (name, port) in [("real", 29311u16), ("ucore", 29312u16)] {
+        let via = if name == "real" { real } else { ucore };
+        // Alpha on and Bravo off, through the server about to be tested.
+        call(via, "POST", &format!("/api/units/{alpha}/control"), &AUTH, r#"{"power_state": true}"#);
+        call(via, "POST", &format!("/api/units/{bravo}/control"), &AUTH, r#"{"power_state": false}"#);
+        let dir = work.join(format!("fire-{name}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), &fire_cfg).unwrap();
+        devices_json(&dir);
+        let t = |minutes: i64| (local_now() + chrono::TimeDelta::minutes(minutes)).format("%Y-%m-%dT%H:%M:%S").to_string();
+        let off = json!({"power_state": false, "operational_mode": null, "target_temperature": null, "fan_speed": null, "swing_mode": null, "eco": null, "turbo": null, "beep": null});
+        let on = json!({"power_state": true, "operational_mode": null, "target_temperature": null, "fan_speed": null, "swing_mode": null, "eco": null, "turbo": null, "beep": null});
+        let seed = json!({"timers": [
+            {"id": "0000000000a1", "unit_ids": [alpha.trim_matches('"')], "minutes": 5, "created_at": t(-6), "fires_at": t(-1), "settings": off, "label": "due"},
+            {"id": "0000000000b1", "unit_ids": [bravo.trim_matches('"')], "minutes": 600, "created_at": t(-620), "fires_at": t(-20), "settings": on, "label": "missed", "kind": "start"},
+            {"id": "0000000000c1", "unit_ids": ["999"], "minutes": 5, "created_at": t(-6), "fires_at": t(-1), "settings": off, "label": "nobody"},
+            {"id": "0000000000d1", "unit_ids": [bravo.trim_matches('"')], "minutes": 600, "created_at": "2026-01-01T00:00:00", "fires_at": "2099-01-01T10:00:00", "settings": off, "label": "later"},
+        ]});
+        std::fs::write(dir.join("timers.json"), serde_json::to_string_pretty(&seed).unwrap()).unwrap();
+        let bin = if name == "real" { core_bin.clone() } else { ucore_bin() };
+        let server = Kill(
+            Command::new(&bin)
+                .arg("serve")
+                .env("AC_CONFIG_DIR", &dir)
+                .env("BREEZE_HOST", "127.0.0.1")
+                .env("BREEZE_PORT", port.to_string())
+                .env("BREEZE_LOG", "0")
+                .env("AC_TIMER_TICK", "1")
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        wait_for(port, name);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let status = loop {
+            let s = call(port, "GET", "/api/timers/status", &AUTH, "").json();
+            if s["fired"].as_u64().unwrap_or(0) + s["errors"].as_u64().unwrap_or(0) >= 2 || Instant::now() > deadline {
+                break s;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        };
+        let a = call(port, "GET", &format!("/api/units/{alpha}/state"), &AUTH, "").json();
+        let b = call(port, "GET", &format!("/api/units/{bravo}/state"), &AUTH, "").json();
+        let left = std::fs::read(dir.join("timers.json")).unwrap();
+        drop(server);
+        assert!(status["runs"].as_u64().unwrap() >= 1, "{name}: {status}");
+        assert_eq!((&a["power_state"], &b["power_state"]), (&json!(false), &json!(false)), "{name}: alpha switched off, bravo left off");
+        results.push((name, status, String::from_utf8_lossy(&left).into_owned()));
+    }
+    let (r, u) = (&results[0], &results[1]);
+    let counts = |s: &Value| (s["fired"].clone(), s["errors"].clone(), s["pending"].clone(), s["next_fires_at"].clone(), s["tick_seconds"].clone());
+    if counts(&r.1) != counts(&u.1) || mask(&r.1.to_string()) != mask(&u.1.to_string()) {
+        failures.push(format!("timers fired\n   real  {}\n   ucore {}", r.1, u.1));
+    }
+    assert_eq!(counts(&u.1), (json!(1), json!(1), json!(1), json!("2099-01-01T10:00:00"), json!(1)), "{}", u.1);
+    if r.2 != u.2 {
+        failures.push(format!("timers.json after firing\n   real  {}\n   ucore {}", r.2, u.2));
     }
 
     assert!(failures.is_empty(), "{} difference(s):\n{}", failures.len(), failures.join("\n"));

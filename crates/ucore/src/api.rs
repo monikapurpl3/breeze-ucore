@@ -17,6 +17,8 @@ pub const FEATURES: &[&str] = &[
     "delete_unit",
     "device_pairing",
     "ed25519_auth",
+    "sleep_timer",
+    "timer_at",
     "unit_capabilities",
     "whoami",
 ];
@@ -56,6 +58,10 @@ pub enum Route {
     AddUnit,
     Rename,
     DeleteUnit,
+    Timers,
+    TimerCreate,
+    TimerStatus,
+    TimerCancel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,9 +91,9 @@ pub fn resolve(method: &str, path: &str) -> Resolved {
         ("GET", "/api/auth/devices", AdminLan, Some(Route::Devices)),
         ("GET", "/api/auth/whoami", Full, Some(Route::Whoami)),
         ("POST", "/api/auth/upgrade", Full, Some(Route::Upgrade)),
-        ("GET", "/api/timers/status", Full, None),
-        ("GET", "/api/timers", Full, None),
-        ("POST", "/api/timers", Full, None),
+        ("GET", "/api/timers/status", Full, Some(Route::TimerStatus)),
+        ("GET", "/api/timers", Full, Some(Route::Timers)),
+        ("POST", "/api/timers", Full, Some(Route::TimerCreate)),
         ("GET", "/api/programs/status", Full, None),
         ("GET", "/api/programs", Full, None),
         ("POST", "/api/programs", Full, None),
@@ -104,6 +110,12 @@ pub fn resolve(method: &str, path: &str) -> Resolved {
         if *p == path {
             return Resolved::MethodNotAllowed(m);
         }
+    }
+    if let Some(timer_id) = path.strip_prefix("/api/timers/") {
+        if timer_id.is_empty() || timer_id.contains('/') {
+            return Resolved::NotFound;
+        }
+        return if method == "DELETE" { Resolved::Route(Full, Route::TimerCancel) } else { Resolved::MethodNotAllowed("DELETE") };
     }
     if let Some(token_id) = path.strip_prefix("/api/auth/devices/") {
         if token_id.is_empty() || token_id.contains('/') {
@@ -129,6 +141,38 @@ pub fn resolve(method: &str, path: &str) -> Resolved {
         ("control", _) => Resolved::MethodNotAllowed("POST"),
         _ => Resolved::NotFound,
     }
+}
+
+/// A query parameter, as Breeze Core reads one: the first `key=value` for
+/// the key (bare flags skipped), `+` as a space, then percent-decoded.
+pub fn query_value(target: &str, key: &str) -> Option<String> {
+    let query = target.split_once('?').map_or("", |(_, q)| q);
+    for pair in query.split('&') {
+        let Some((k, v)) = pair.split_once('=') else { continue };
+        if k == key {
+            return Some(percent_decode(&v.replace('+', " ")));
+        }
+    }
+    None
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // As Breeze Core: a `%XY` that ends the string is left alone.
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Some(b) = core::str::from_utf8(&bytes[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The `{id}` in `/api/units/{id}/...`, as asked for.
@@ -382,8 +426,9 @@ pub struct Upgraded<'a> {
 }
 
 /// A control request, field for field Breeze Core's, so serde's own messages
-/// for a malformed one come out the same.
-#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+/// for a malformed one come out the same, and a stored one (a timer's, a
+/// program's) is written with every field, nulls included.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ControlRequest {
     #[serde(default)]
     pub power_state: Option<bool>,
@@ -487,6 +532,11 @@ mod tests {
         assert_eq!(resolve("GET", "/api/units/123/history"), Resolved::NotFound);
         assert_eq!(resolve("GET", "/api/system"), Resolved::NotFound);
         assert_eq!(resolve("GET", "/api/units/scan"), Resolved::NotFound);
+        assert_eq!(resolve("POST", "/api/timers"), Resolved::Route(Guard::Full, Route::TimerCreate));
+        assert_eq!(resolve("PUT", "/api/timers"), Resolved::MethodNotAllowed("GET"));
+        assert_eq!(resolve("GET", "/api/timers/status"), Resolved::Route(Guard::Full, Route::TimerStatus));
+        assert_eq!(resolve("GET", "/api/timers/abc"), Resolved::MethodNotAllowed("DELETE"));
+        assert_eq!(resolve("DELETE", "/api/timers/a/b"), Resolved::NotFound);
     }
 
     #[test]

@@ -69,6 +69,12 @@ impl Platform for Host {
         SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_millis() as u64)
     }
 
+    fn local_offset(&mut self, unix_s: i64) -> Option<i32> {
+        // The system's zone, read as Breeze Core reads it (chrono's Local).
+        use chrono::{Offset, TimeZone};
+        chrono::Local.timestamp_opt(unix_s, 0).single().map(|t| t.offset().fix().local_minus_utc())
+    }
+
     fn random(&mut self, buf: &mut [u8]) {
         getrandom::getrandom(buf).expect("the system's random source");
     }
@@ -178,6 +184,7 @@ fn settings() -> ucore::Settings {
         code_ttl: var("AC_CODE_TTL").unwrap_or(d.code_ttl),
         token_ttl_days: var("AC_TOKEN_TTL_DAYS").unwrap_or(d.token_ttl_days),
         auth_skew: var("AC_AUTH_SKEW_SECONDS").unwrap_or(d.auth_skew),
+        timer_tick: var("AC_TIMER_TICK").unwrap_or(d.timer_tick),
         ..d
     }
 }

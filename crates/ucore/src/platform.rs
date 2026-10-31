@@ -45,6 +45,10 @@ pub trait Platform {
     fn now_ms(&mut self) -> u64;
     /// Wall-clock Unix milliseconds, once the platform knows the time.
     fn unix_ms(&mut self) -> Option<u64>;
+    /// How far local time is ahead of UTC at that moment, in seconds, DST
+    /// included: timers and schedules run on local time, as Breeze Core's do.
+    /// `None` while the platform does not know its zone; they wait.
+    fn local_offset(&mut self, unix_s: i64) -> Option<i32>;
     fn random(&mut self, buf: &mut [u8]);
 
     /// Start connecting to a unit; [`Platform::is_connected`] says when done.

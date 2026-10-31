@@ -42,9 +42,9 @@ Breeze Core a step above the vendor's platform:
 **In development; nothing released yet.** Milestone 1 is done: the protocol,
 units, state, control and capabilities, on an ordinary computer, matching
 Breeze Core 4.3.2 under the differential test (a 338 KB build). Of milestone
-2, pairing (both auth versions) and the configuration routes (adding units by
-address, renaming, removing) are done; timers, programs and the live stream
-come next, then the ESP32-S3.
+2, pairing (both auth versions), the configuration routes (adding units by
+address, renaming, removing) and timers (sleep timers and scheduled starts)
+are done; programs and the live stream come next, then the ESP32-S3.
 [DESIGN.md](DESIGN.md) has the plan, the milestones and the reasoning.
 
 ## Versions

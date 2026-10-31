@@ -7,7 +7,9 @@ use crate::http::{self, Parsed, Response};
 use crate::platform::{Conn, NetKind, Platform};
 use crate::proto::discover::{self, Discovered};
 use crate::store::{AppConfig, DevicesDoc, UnitConfig};
+use crate::timers::{self, Timer, TimerRequest, TimersDoc, When};
 use crate::unit::{Outcome, ReqId, Timing, Unit};
+use crate::clock;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -36,6 +38,8 @@ pub struct Settings {
     pub token_ttl_days: i64,
     /// `AC_AUTH_SKEW_SECONDS`: how far a signed request's clock may be off.
     pub auth_skew: u64,
+    /// `AC_TIMER_TICK`: seconds between passes over the timers.
+    pub timer_tick: u64,
     /// The build's commit, for `/api/version`.
     pub commit: &'static str,
 }
@@ -49,6 +53,7 @@ impl Default for Settings {
             code_ttl: 60,
             token_ttl_days: 3650,
             auth_skew: 60,
+            timer_tick: 15,
             commit: option_env!("UCORE_COMMIT").unwrap_or("unknown"),
         }
     }
@@ -106,6 +111,21 @@ pub struct Core {
     next_req: ReqId,
     enrollment: auth::Enrollment,
     nonces: auth::Nonces,
+    timers: TimersDoc,
+    runner: Runner,
+    /// Units' work a timer asked for: nobody waits on it, it is only counted.
+    jobs: Vec<(ReqId, u64)>,
+}
+
+/// How the timers are doing, for `/api/timers/status`.
+#[derive(Default)]
+struct Runner {
+    runs: u64,
+    fired: u64,
+    errors: u64,
+    last_run: Option<String>,
+    /// When the next pass is due, on the monotonic clock.
+    next: u64,
 }
 
 impl Core {
@@ -126,10 +146,13 @@ impl Core {
         }
         let config: AppConfig = load(p, "config.json");
         let devices: DevicesDoc = load(p, "devices.json");
+        let timers: TimersDoc = load(p, "timers.json");
+        // As Breeze Core's runner: it sleeps a tick, then looks.
+        let runner = Runner { next: p.now_ms() + settings.timer_tick.max(1) * 1000, ..Runner::default() };
         let units = config.units.iter().map(|u| unit_from(u, settings.timing)).collect();
         let enrollment = auth::Enrollment::new(settings.code_ttl, settings.token_ttl_days);
         let nonces = auth::Nonces::new(settings.auth_skew);
-        Self { settings, config, devices, units, clients: Vec::new(), next_req: 1, enrollment, nonces }
+        Self { settings, config, devices, units, clients: Vec::new(), next_req: 1, enrollment, nonces, timers, runner, jobs: Vec::new() }
     }
 
     fn req(&mut self) -> ReqId {
@@ -152,8 +175,17 @@ impl Core {
         }
         for u in 0..self.units.len() {
             for (req, outcome) in self.units[u].poll(p, now) {
-                self.deliver(req, outcome);
+                if let Some(j) = self.jobs.iter().position(|(r, _)| *r == req) {
+                    let (_, unit) = self.jobs.swap_remove(j);
+                    self.count(unit, outcome, p);
+                } else {
+                    self.deliver(req, outcome);
+                }
             }
+        }
+        if now >= self.runner.next {
+            self.run_timers(p);
+            self.runner.next = now + self.settings.timer_tick.max(1) * 1000;
         }
         for i in 0..self.clients.len() {
             if matches!(self.clients[i].phase, Phase::Waiting(Pending::Probe(_))) {
@@ -162,7 +194,7 @@ impl Core {
         }
         self.write_clients(p, now);
         let busy = self.units.iter().any(Unit::busy) || !self.clients.is_empty();
-        let next = self.units.iter().filter_map(Unit::deadline).min();
+        let next = self.units.iter().filter_map(Unit::deadline).chain([self.runner.next]).min();
         match next {
             Some(t) => t.saturating_sub(now).min(if busy { 5 } else { 50 }),
             None if busy => 5,
@@ -274,6 +306,9 @@ impl Core {
         let now_mono = p.now_ms();
         if let Some(answer) = self.config_route(route, r, p, now_mono) {
             return answer;
+        }
+        if let Some(response) = self.timer_route(route, r, p) {
+            return Ok(response);
         }
         match route {
             Route::Health => Ok(Response::json(200, &Health { status: "ok" })),
@@ -504,9 +539,161 @@ impl Core {
         Response::json(201, &api::ConfigUnit::from(&stored))
     }
 
+    fn save_timers(&self, p: &mut impl Platform) -> Result<(), String> {
+        p.write_file("timers.json", &crate::store::to_json(&self.timers), true)
+    }
+
+    /// `/api/timers`: `None` for any other route.
+    fn timer_route(&mut self, route: Route, r: &http::Request, p: &mut impl Platform) -> Option<Response> {
+        let no_clock = || Response::detail(503, "the server does not know the time yet");
+        Some(match route {
+            Route::Timers => {
+                let kinds = match timers::listed_kinds(api::query_value(&r.target, "kind").as_deref()) {
+                    Ok(k) => k,
+                    Err(e) => return Some(Response::detail(422, &e)),
+                };
+                let Some(now) = clock::now(p) else { return Some(no_clock()) };
+                let list: Vec<_> = self.timers.timers.iter().filter(|t| kinds.contains(&t.kind)).map(|t| t.view(now)).collect();
+                Response::json(200, &list)
+            }
+            Route::TimerCreate => {
+                let request: TimerRequest = match serde_json::from_slice(&r.body) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Response::detail(422, &alloc::format!("invalid timer request: {e}"))),
+                };
+                let when = match request.when() {
+                    Ok(w) => w,
+                    Err(e) => return Some(Response::detail(422, e)),
+                };
+                // 422 whatever the check: Breeze Core's control route says 400
+                // for a bad name, its timers do not.
+                if let Some(Err((_, e))) = request.settings.as_ref().map(ControlRequest::validate) {
+                    return Some(Response::detail(422, &e));
+                }
+                // A timer that quietly covers nothing is worse than an error.
+                let unknown: Vec<&str> = request
+                    .unit_ids
+                    .iter()
+                    .filter(|id| !id.parse::<u64>().is_ok_and(|n| self.units.iter().any(|u| u.id == n)))
+                    .map(String::as_str)
+                    .collect();
+                if !unknown.is_empty() {
+                    return Some(Response::detail(404, &alloc::format!("unknown unit(s): {}", unknown.join(", "))));
+                }
+                let mut bytes = [0u8; 6];
+                p.random(&mut bytes);
+                let id: String = bytes.iter().map(|b| alloc::format!("{b:02x}")).collect();
+                let Some(now) = clock::now(p) else { return Some(no_clock()) };
+                let TimerRequest { unit_ids, settings, label, .. } = request;
+                let built = match when {
+                    When::In(minutes) => timers::build_sleep(id, unit_ids.clone(), minutes, settings, &label, now),
+                    When::At { days, at } => timers::build_start(id, unit_ids.clone(), days, &at, &label, now),
+                };
+                let timer = match built {
+                    Ok(t) => t,
+                    Err(e) => return Some(Response::detail(422, &e)),
+                };
+                self.timers.replace_for_units(&unit_ids, timer.kind);
+                self.timers.timers.push(timer.clone());
+                if let Err(e) = self.save_timers(p) {
+                    // Or the API would report a timer that vanishes on restart.
+                    self.timers.remove(&timer.id);
+                    return Some(Response::detail(500, &alloc::format!("cannot write the timer store: {e}")));
+                }
+                Response::json(201, &timer.view(now))
+            }
+            Route::TimerStatus => Response::json(
+                200,
+                &TimerStatus {
+                    running: true,
+                    tick_seconds: self.settings.timer_tick,
+                    runs: self.runner.runs,
+                    fired: self.runner.fired,
+                    errors: self.runner.errors,
+                    last_run: self.runner.last_run.as_deref(),
+                    pending: self.timers.timers.len(),
+                    next_fires_at: self.timers.next_fires_at(),
+                },
+            ),
+            Route::TimerCancel => {
+                let id = r.path.strip_prefix("/api/timers/").unwrap_or_default();
+                if !self.timers.remove(id) {
+                    return Some(Response::detail(404, "no such timer"));
+                }
+                if let Err(e) = self.save_timers(p) {
+                    return Some(Response::detail(500, &alloc::format!("cannot write the timer store: {e}")));
+                }
+                Response { status: 204, body: Vec::new(), extra: Vec::new() }
+            }
+            _ => return None,
+        })
+    }
+
+    /// One pass, as Breeze Core's runner makes it: fire what is due, then
+    /// forget it in one write, so nothing fires twice.
+    fn run_timers(&mut self, p: &mut impl Platform) {
+        // No clock, no timers: they wait rather than fire at a guess.
+        let Some(now) = clock::now(p) else { return };
+        let due: Vec<Timer> = self.timers.timers.iter().filter(|t| t.is_due(now)).cloned().collect();
+        for timer in &due {
+            if timer.missed(now) {
+                p.log(&alloc::format!(
+                    "timer {}: a scheduled start for {} was missed while the server was not running -- dropped, not switched on late",
+                    timer.id, timer.fires_at
+                ));
+                continue;
+            }
+            let targets: Vec<u64> = if timer.unit_ids.is_empty() {
+                self.units.iter().map(|u| u.id).collect()
+            } else {
+                timer.unit_ids.iter().filter_map(|s| s.parse().ok()).collect()
+            };
+            for unit in targets {
+                match self.units.iter().position(|u| u.id == unit) {
+                    Some(u) => {
+                        let req = self.req();
+                        self.units[u].control(req, timer.settings.change());
+                        self.jobs.push((req, unit));
+                    }
+                    None => {
+                        self.runner.errors += 1;
+                        p.log(&alloc::format!("timer {} failed on unit {unit}: unit has no V3 token and key configured", timer.id));
+                    }
+                }
+            }
+        }
+        if !due.is_empty() {
+            for timer in &due {
+                self.timers.remove(&timer.id);
+            }
+            if let Err(e) = self.save_timers(p) {
+                p.log(&alloc::format!("cannot write the timer store after firing: {e}"));
+                self.runner.errors += 1;
+            }
+        }
+        self.runner.runs += 1;
+        self.runner.last_run = Some(clock::format(clock::seconds(now)));
+    }
+
+    /// A timer's work on a unit came back.
+    fn count(&mut self, unit: u64, outcome: Outcome, p: &mut impl Platform) {
+        match outcome {
+            Outcome::Control(Ok(_)) => self.runner.fired += 1,
+            Outcome::Control(Err(e)) => {
+                self.runner.errors += 1;
+                p.log(&alloc::format!("a timer failed on unit {unit}: {e}"));
+            }
+            _ => {}
+        }
+    }
+
     /// Answer everyone still waiting on a unit that has just been removed or
     /// replaced: its work will not finish.
     fn abandon(&mut self, id: u64) {
+        // A timer's work on it will not be answered either: a failure.
+        let before = self.jobs.len();
+        self.jobs.retain(|(_, unit)| *unit != id);
+        self.runner.errors += (before - self.jobs.len()) as u64;
         for c in self.clients.iter_mut() {
             if matches!(&c.phase, Phase::Waiting(pending) if pending.unit(id)) {
                 let r = Response::detail(503, "the unit was removed or replaced while this request waited");
@@ -718,6 +905,18 @@ impl Core {
 
 fn unit_from(u: &UnitConfig, timing: Timing) -> Unit {
     Unit::new(u.id as u64, u.name.clone(), u.ip.clone(), u.port, u.token.as_deref(), u.key.as_deref(), timing)
+}
+
+#[derive(serde::Serialize)]
+struct TimerStatus<'a> {
+    running: bool,
+    tick_seconds: u64,
+    runs: u64,
+    fired: u64,
+    errors: u64,
+    last_run: Option<&'a str>,
+    pending: usize,
+    next_fires_at: Option<&'a str>,
 }
 
 #[derive(serde::Serialize)]
