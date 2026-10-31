@@ -1,4 +1,4 @@
-//! Breeze μcore on an ordinary computer: for developing it, for the
+//! Breeze μCore on an ordinary computer: for developing it, for the
 //! differential test against Breeze Core, and as a very small build for a
 //! router. The same environment as Breeze Core: `AC_CONFIG_DIR` holds
 //! `config.json` and `devices.json`; `BREEZE_HOST` and `BREEZE_PORT` say
@@ -172,7 +172,7 @@ impl Platform for Host {
     }
 }
 
-/// Breeze Core's environment variables for what μcore keeps.
+/// Breeze Core's environment variables for what μCore keeps.
 fn settings() -> ucore::Settings {
     fn var<T: std::str::FromStr>(name: &str) -> Option<T> {
         std::env::var(name).ok().and_then(|v| v.parse().ok())

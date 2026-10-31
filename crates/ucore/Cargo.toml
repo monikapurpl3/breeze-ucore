@@ -1,6 +1,6 @@
 [package]
 name = "ucore"
-description = "Breeze μcore: Breeze Core for small machines. no_std, no I/O of its own."
+description = "Breeze μCore: Breeze Core for small machines. no_std, no I/O of its own."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

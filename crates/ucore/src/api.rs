@@ -1,4 +1,4 @@
-//! Breeze Core's API, the routes μcore keeps: their shapes, their wording,
+//! Breeze Core's API, the routes μCore keeps: their shapes, their wording,
 //! their status codes. Every struct here serialises in the field order Breeze
 //! Core's answers have, and the differential test holds it to that.
 
@@ -8,7 +8,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
-/// What `/api/version` advertises: only what μcore has, in Breeze Core's order.
+/// What `/api/version` advertises: only what μCore has, in Breeze Core's order.
 pub const FEATURES: &[&str] = &[
     "batch_state",
     "beep_control",
@@ -72,9 +72,9 @@ pub enum Resolved {
     NotFound,
 }
 
-/// Breeze Core's routing, in its order, less what μcore leaves out (which is
+/// Breeze Core's routing, in its order, less what μCore leaves out (which is
 /// then simply not there: 404, as a release without the feature answers).
-/// `None` marks a route of Breeze Core's that μcore has not built yet: known,
+/// `None` marks a route of Breeze Core's that μCore has not built yet: known,
 /// so that another method gets Breeze Core's 405.
 pub fn resolve(method: &str, path: &str) -> Resolved {
     use Guard::*;
@@ -285,7 +285,7 @@ pub struct RenameRequest {
     pub name: String,
 }
 
-/// Breeze Core's, Midea account fields included: μcore has no cloud, and says
+/// Breeze Core's, Midea account fields included: μCore has no cloud, and says
 /// so the way a Breeze Core built without one does.
 #[derive(Debug, Deserialize)]
 pub struct AddUnitRequest {

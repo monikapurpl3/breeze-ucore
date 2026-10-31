@@ -160,7 +160,7 @@ fn units_are_added_by_address_as_breeze_core_adds_them() {
         ("/api/units", "POST", r#"{"ip": "10.94.1.50"}"#),
         // Again, renamed: the same unit, updated, its credentials kept.
         ("/api/units", "POST", r#"{"ip": "10.94.1.2", "name": "Renamed by adding"}"#),
-        // No cloud in μcore, and Breeze Core's answer for a build without one
+        // No cloud in μCore, and Breeze Core's answer for a build without one
         // differs only in that it would ask Midea; so not compared, not sent.
         ("/api/config", "GET", ""),
         ("/api/units", "GET", ""),

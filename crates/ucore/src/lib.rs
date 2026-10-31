@@ -1,4 +1,4 @@
-//! Breeze μcore: Breeze Core for small machines.
+//! Breeze μCore: Breeze Core for small machines.
 //!
 //! `no_std` with `alloc`, and no I/O of its own: a platform adapter (the host
 //! build, an ESP32, ...) hands it time, randomness, sockets and storage
@@ -23,10 +23,10 @@ pub mod unit;
 
 pub use crate::server::{banner, Core, Settings, MAX_CLIENTS};
 
-/// μcore's own version (the crates' semver).
+/// μCore's own version (the crates' semver).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The Breeze Core native release whose behaviour μcore follows: its API, its
+/// The Breeze Core native release whose behaviour μCore follows: its API, its
 /// store formats, and the release the differential test compares against.
 pub const NATIVE: &str = "4.3.2";
 
@@ -35,7 +35,7 @@ pub fn product_version() -> alloc::string::String {
     alloc::format!("{VERSION}u{NATIVE}")
 }
 
-/// The version `/api/version` reports: the API spoken, with μcore's version as
+/// The version `/api/version` reports: the API spoken, with μCore's version as
 /// semver build metadata, so a parser sees 4.3.2 and a printer shows both.
 pub fn wire_version() -> alloc::string::String {
     alloc::format!("{NATIVE}+u{VERSION}")

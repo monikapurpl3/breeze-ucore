@@ -1,6 +1,6 @@
 [package]
 name = "ucore-host"
-description = "Breeze μcore on an ordinary computer: development, tests, small routers."
+description = "Breeze μCore on an ordinary computer: development, tests, small routers."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

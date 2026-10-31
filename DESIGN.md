@@ -1,4 +1,4 @@
-# Breeze μcore — design
+# Breeze μCore — design
 
 Breeze Core for small machines: an ESP32-S3 first, then anything with a few
 hundred kilobytes of RAM and a network stack. It is still Breeze Core — the
@@ -11,10 +11,10 @@ For people comfortable with an API, `curl` and `breezectl`: there is no page.
 
 ## The contract
 
-**Every route μcore keeps answers exactly as Breeze Core does** — status,
+**Every route μCore keeps answers exactly as Breeze Core does** — status,
 headers and body, byte for byte where Breeze Core's own answer is fixed, and
 key for key where a reading moves between two calls. `/api/version` lists only
-the features μcore has, so the Android app, breezectl and scripts work with it
+the features μCore has, so the Android app, breezectl and scripts work with it
 unchanged: they already decide what to show from that list.
 
 **The store files are Breeze Core's**: `config.json`, `devices.json`,
@@ -25,16 +25,16 @@ are.
 The code is not shared; the behaviour is. Everything that made Breeze Core
 correct was found by checking against something outside it (the transposed swing
 axis, the AES-256 session key, banker's rounding in curves, a schedule's
-normalised days, spending a nonce only after the signature verifies). μcore
+normalised days, spending a nonce only after the signature verifies). μCore
 inherits those findings as **tests**, not as code: the protocol vectors, the
 store fixtures, the curve samples and the auth vectors are ported, and a
-differential test holds μcore's answers to a real `breeze-core`'s on the same
+differential test holds μCore's answers to a real `breeze-core`'s on the same
 emulated units (breeze-mock).
 
 ## Versions
 
-**The product version is `<μcore version>u<Breeze Core native version>`**,
-for example `1.0.0u4.3.2`: μcore's own version, then `u`, then the Breeze
+**The product version is `<μCore version>u<Breeze Core native version>`**,
+for example `1.0.0u4.3.2`: μCore's own version, then `u`, then the Breeze
 Core native release whose behaviour it follows (its API, its store formats,
 the release the differential test runs against). That is what people see:
 release names, firmware file names, `--version`, the boot log. Cargo needs
@@ -42,15 +42,15 @@ plain semver, so the crates are `1.0.0`, and the full string is built from
 that and one constant naming the native release.
 
 **On the wire it is `4.3.2+u1.0.0`.** `/api/version` reports the API it
-speaks, so anything that parses versions sees 4.3.2. The μcore version rides
+speaks, so anything that parses versions sees 4.3.2. The μCore version rides
 along as semver build metadata, which every parser ignores for comparison and
 every printer shows, so `diag`, breezectl and bug reports still say what the
 server really is. (The Android app's own parser splits at `-` and `+` before
-comparing.) `name` is `Breeze μcore`; no client compares it.
+comparing.) `name` is `Breeze μCore`; no client compares it.
 
 What a client may do is still decided by `features`, never by the version.
 The app's Nerd screen is the one place that gates on the version: against
-μcore it would pass and then find no `/api/system`. That screen should check
+μCore it would pass and then find no `/api/system`. That screen should check
 `system_info` instead (milestone 5).
 
 ## What it keeps
@@ -136,7 +136,7 @@ the serial console; `GET /api/config` from the LAN is the admin view after that.
 
 ## Budgets (to be measured, then held)
 
-- ESP32-S3 without PSRAM: μcore's own heap at most 160 KB with 8 units, 4
+- ESP32-S3 without PSRAM: μCore's own heap at most 160 KB with 8 units, 4
   clients and 2 streams; flash for the application at most 1 MB.
 - A host build of a few hundred kilobytes.
 - A test fails when a budget is exceeded.
@@ -145,11 +145,11 @@ the serial console; `GET /api/config` from the LAN is the admin view after that.
 
 - **Ported vectors and fixtures**: msmart's protocol vectors, Breeze Core's
   store fixtures (byte round trips), the curve samples, the auth signatures.
-- **Differential**: μcore's host build and a real `breeze-core` on the same
+- **Differential**: μCore's host build and a real `breeze-core` on the same
   breeze-mock units, every kept route, the same answers (as breeze-mock's own
   `differential.rs` does).
-- **`breeze-core diag`** pointed at μcore passes everything μcore advertises.
-- **The clients**: the Android app and breezectl against a μcore, by hand.
+- **`breeze-core diag`** pointed at μCore passes everything μCore advertises.
+- **The clients**: the Android app and breezectl against a μCore, by hand.
 - **On the chip**: Espressif's QEMU (emulated Ethernet) with breeze-mock units on
   the PC, then a real ESP32-S3 on Wi-Fi.
 
@@ -158,7 +158,7 @@ the serial console; `GET /api/config` from the LAN is the admin view after that.
 1. **Units on the host.** `ucore` + `ucore-host`: health, version, units, state,
    batch state, control, capabilities, behind the API key and device tokens
    preset in `devices.json`. Differential test green for those routes.
-2. **All of Breeze Core that μcore keeps.** Pairing, signed requests, devices,
+2. **All of Breeze Core that μCore keeps.** Pairing, signed requests, devices,
    config routes, timers, programs and curves, the event stream. Differential
    test green for every kept route; `diag` passes.
 3. **The chip spike.** The same core on an ESP32-S3: esp-hal + embassy against
@@ -167,8 +167,8 @@ the serial console; `GET /api/config` from the LAN is the admin view after that.
 4. **The chip, properly.** Wi-Fi setup, SNTP and TZ, flash storage, watchdog,
    memory and flash budgets enforced.
 5. **Shipping it.** Firmware images, flashing from the browser on aspic, the
-   docs, breezectl's admin commands for a μcore (approve, add a unit), a
-   breeze-mock profile so clients can be tested against a μcore.
+   docs, breezectl's admin commands for a μCore (approve, add a unit), a
+   breeze-mock profile so clients can be tested against a μCore.
 6. **A second chip** (Pico 2 W), to prove the portability is real.
 
 ## Open questions

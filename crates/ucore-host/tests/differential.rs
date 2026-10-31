@@ -1,4 +1,4 @@
-//! μcore against the real thing: a Breeze Core binary and μcore on the same
+//! μCore against the real thing: a Breeze Core binary and μCore on the same
 //! configuration and the same emulated units (breeze-mock), the same requests,
 //! and the same answers. Byte for byte where Breeze Core's answer is fixed;
 //! key for key and value for value where a reading moves between two calls.
@@ -6,7 +6,7 @@
 //!   BREEZE_CORE_BIN=/path/to/breeze-core BREEZE_MOCK_BIN=/path/to/breeze-mock \
 //!     cargo test -p ucore-host --test differential
 //!
-//! Skipped without both. This is what holds μcore to Breeze Core.
+//! Skipped without both. This is what holds μCore to Breeze Core.
 
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -182,7 +182,7 @@ fn signed(port: u16, key: &ed25519_dalek::SigningKey, key_id: &str, method: &str
     call(port, method, path, &headers, body)
 }
 
-/// The μcore under test: this build's, or UCORE_BIN (a cross-built one run
+/// The μCore under test: this build's, or UCORE_BIN (a cross-built one run
 /// where this test binary was copied to).
 fn ucore_bin() -> PathBuf {
     std::env::var_os("UCORE_BIN").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_ucore")))
@@ -425,7 +425,7 @@ fn ucore_answers_as_breeze_core_does() {
         }
     }
 
-    // And not because both failed alike: what μcore said is what it should.
+    // And not because both failed alike: what μCore said is what it should.
     let one = call(ucore, "GET", &format!("/api/units/{alpha}/state"), &AUTH, "").json();
     assert_eq!((one["online"].clone(), one["name"].clone()), (json!(true), json!("Alpha")), "{one}");
     let all = call(ucore, "GET", "/api/units/state", &AUTH, "").json();
@@ -452,15 +452,15 @@ fn ucore_answers_as_breeze_core_does() {
         answers[1]
     );
 
-    // /api/version: Breeze Core's shape, μcore's identity.
+    // /api/version: Breeze Core's shape, μCore's identity.
     let (r, u) = (call(real, "GET", "/api/version", &AUTH, "").json(), call(ucore, "GET", "/api/version", &AUTH, "").json());
     let keys = |v: &Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
     assert_eq!(keys(&r), keys(&u), "/api/version keys");
-    assert_eq!(u["name"], "Breeze μcore");
+    assert_eq!(u["name"], "Breeze μCore");
     assert_eq!(u["version"], format!("{}+u{}", ucore::NATIVE, ucore::VERSION));
     assert_eq!((r["units"].clone(), r["min_auth_version"].clone()), (u["units"].clone(), u["min_auth_version"].clone()));
     for f in u["features"].as_array().unwrap() {
-        assert!(r["features"].as_array().unwrap().contains(f), "μcore advertises {f}, which Breeze Core does not");
+        assert!(r["features"].as_array().unwrap().contains(f), "μCore advertises {f}, which Breeze Core does not");
     }
 
     // ------------------------------------------------------ pairing and auth

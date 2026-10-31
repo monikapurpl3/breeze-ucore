@@ -24,7 +24,7 @@ pub const MAX_CLIENTS: usize = 4;
 /// A client that sends nothing for this long is dropped.
 const CLIENT_IDLE_MS: u64 = 30_000;
 
-/// Breeze Core's settings that μcore keeps, with Breeze Core's defaults.
+/// Breeze Core's settings that μCore keeps, with Breeze Core's defaults.
 #[derive(Debug, Clone)]
 pub struct Settings {
     pub timing: Timing,
@@ -315,7 +315,7 @@ impl Core {
             Route::Version => Ok(Response::json(
                 200,
                 &api::Version {
-                    name: "Breeze μcore",
+                    name: "Breeze μCore",
                     version: crate::wire_version(),
                     commit: self.settings.commit,
                     features: api::FEATURES,
@@ -926,5 +926,5 @@ struct Health {
 
 /// For the log line at start.
 pub fn banner(core: &Core) -> String {
-    alloc::format!("Breeze μcore {} (API {}), {} unit(s)", crate::product_version(), crate::NATIVE, core.units.len())
+    alloc::format!("Breeze μCore {} (API {}), {} unit(s)", crate::product_version(), crate::NATIVE, core.units.len())
 }

@@ -19,7 +19,7 @@ no command line, nothing a microcontroller cannot carry.
 ## Why
 
 A Breeze Core server today needs a computer: a Raspberry Pi, a NAS, a router
-with room to spare. μcore is for a board that costs a few euros, draws half a
+with room to spare. μCore is for a board that costs a few euros, draws half a
 watt and never needs an operating system update — and still does what puts
 Breeze Core a step above the vendor's platform:
 
@@ -28,7 +28,7 @@ Breeze Core a step above the vendor's platform:
   and Ed25519-signed requests, timers, schedules, programs and temperature
   curves, and the live stream.
 - **Held to Breeze Core, not just modelled on it.** A differential test runs a
-  real Breeze Core and μcore on the same emulated air conditioners
+  real Breeze Core and μCore on the same emulated air conditioners
   (breeze-mock) and requires
   the same status, headers and body for every request it compares.
 - **Built to port.** The core is `no_std`, does no I/O of its own, runs on one
@@ -49,7 +49,7 @@ are done; programs and the live stream come next, then the ESP32-S3.
 
 ## Versions
 
-`1.0.0u4.3.2` is μcore 1.0.0 following Breeze Core 4.3.2. On the wire,
+`1.0.0u4.3.2` is μCore 1.0.0 following Breeze Core 4.3.2. On the wire,
 `/api/version` says `4.3.2+u1.0.0`, so clients see the API they speak.
 
 ## Building
@@ -78,7 +78,7 @@ elsewhere; its header says how to run it.
 
 No web panel, no command line, no unit scan (units are added by address), no
 cloud token fetch: V3 credentials come from wherever you already keep them.
-Breeze Core 4 drives V3 units only, and so does μcore. Until it runs on a chip,
+Breeze Core 4 drives V3 units only, and so does μCore. Until it runs on a chip,
 it is a small server for computers and nothing more.
 
 ## Licence
