@@ -7,6 +7,7 @@ use crate::http::{self, Parsed, Response};
 use crate::platform::{Conn, NetKind, Platform};
 use crate::proto::discover::{self, Discovered};
 use crate::store::{AppConfig, DevicesDoc, UnitConfig};
+use crate::programs::{self, Program, ProgramSpec, ProgramsDoc};
 use crate::timers::{self, Timer, TimerRequest, TimersDoc, When};
 use crate::unit::{Outcome, ReqId, Timing, Unit};
 use crate::clock;
@@ -40,6 +41,8 @@ pub struct Settings {
     pub auth_skew: u64,
     /// `AC_TIMER_TICK`: seconds between passes over the timers.
     pub timer_tick: u64,
+    /// `AC_SCHED_TICK`: seconds between passes over the programs (5 at least).
+    pub sched_tick: u64,
     /// The build's commit, for `/api/version`.
     pub commit: &'static str,
 }
@@ -54,6 +57,7 @@ impl Default for Settings {
             token_ttl_days: 3650,
             auth_skew: 60,
             timer_tick: 15,
+            sched_tick: 30,
             commit: option_env!("UCORE_COMMIT").unwrap_or("unknown"),
         }
     }
@@ -68,6 +72,17 @@ enum Pending {
     Batch { parts: Vec<(u64, ReqId, Option<Outcome>)> },
     /// Adding a unit: the hello is out, replies are being collected.
     Probe(Box<Probe>),
+    /// A program applied now: one unit after another, as Breeze Core does,
+    /// stopping at the first that fails.
+    Apply(Box<Apply>),
+}
+
+struct Apply {
+    current: (u64, ReqId),
+    rest: Vec<u64>,
+    request: ControlRequest,
+    /// The units' answers so far, serialised.
+    done: Vec<Vec<u8>>,
 }
 
 struct Probe {
@@ -84,6 +99,7 @@ impl Pending {
             Pending::State { unit, .. } | Pending::Caps { unit, .. } | Pending::Control { unit, .. } => *unit == id,
             Pending::Batch { parts } => parts.iter().any(|(u, _, _)| *u == id),
             Pending::Probe(_) => false,
+            Pending::Apply(a) => a.current.0 == id || a.rest.contains(&id),
         }
     }
 }
@@ -113,8 +129,35 @@ pub struct Core {
     nonces: auth::Nonces,
     timers: TimersDoc,
     runner: Runner,
-    /// Units' work a timer asked for: nobody waits on it, it is only counted.
-    jobs: Vec<(ReqId, u64)>,
+    programs: ProgramsDoc,
+    scheduler: Scheduler,
+    /// Units' work a timer or a program asked for: nobody waits on it.
+    jobs: Vec<Job>,
+}
+
+struct Job {
+    req: ReqId,
+    unit: u64,
+    kind: JobKind,
+}
+
+enum JobKind {
+    Timer,
+    Schedule { name: String },
+    Curve { program: String, name: String, temp: f64 },
+}
+
+/// The scheduler's own bookkeeping, as Breeze Core keeps it.
+#[derive(Default)]
+struct Scheduler {
+    runs: u64,
+    last_run: Option<String>,
+    next: u64,
+    /// (program, entry) -> the minute it last fired: once per minute.
+    fired: BTreeMap<(String, usize), String>,
+    /// (program, unit) -> the setpoint last applied: a curve moves in half
+    /// degrees, and a hand's nudge stands until the curve moves on.
+    curve_applied: BTreeMap<(String, String), f64>,
 }
 
 /// How the timers are doing, for `/api/timers/status`.
@@ -147,12 +190,14 @@ impl Core {
         let config: AppConfig = load(p, "config.json");
         let devices: DevicesDoc = load(p, "devices.json");
         let timers: TimersDoc = load(p, "timers.json");
+        let programs: ProgramsDoc = load(p, "programs.json");
+        let scheduler = Scheduler { next: p.now_ms() + settings.sched_tick.max(5) * 1000, ..Scheduler::default() };
         // As Breeze Core's runner: it sleeps a tick, then looks.
         let runner = Runner { next: p.now_ms() + settings.timer_tick.max(1) * 1000, ..Runner::default() };
         let units = config.units.iter().map(|u| unit_from(u, settings.timing)).collect();
         let enrollment = auth::Enrollment::new(settings.code_ttl, settings.token_ttl_days);
         let nonces = auth::Nonces::new(settings.auth_skew);
-        Self { settings, config, devices, units, clients: Vec::new(), next_req: 1, enrollment, nonces, timers, runner, jobs: Vec::new() }
+        Self { settings, config, devices, units, clients: Vec::new(), next_req: 1, enrollment, nonces, timers, runner, programs, scheduler, jobs: Vec::new() }
     }
 
     fn req(&mut self) -> ReqId {
@@ -175,9 +220,9 @@ impl Core {
         }
         for u in 0..self.units.len() {
             for (req, outcome) in self.units[u].poll(p, now) {
-                if let Some(j) = self.jobs.iter().position(|(r, _)| *r == req) {
-                    let (_, unit) = self.jobs.swap_remove(j);
-                    self.count(unit, outcome, p);
+                if let Some(j) = self.jobs.iter().position(|j| j.req == req) {
+                    let job = self.jobs.swap_remove(j);
+                    self.count(job, outcome, p);
                 } else {
                     self.deliver(req, outcome);
                 }
@@ -187,6 +232,10 @@ impl Core {
             self.run_timers(p);
             self.runner.next = now + self.settings.timer_tick.max(1) * 1000;
         }
+        if now >= self.scheduler.next {
+            self.run_scheduler(p);
+            self.scheduler.next = now + self.settings.sched_tick.max(5) * 1000;
+        }
         for i in 0..self.clients.len() {
             if matches!(self.clients[i].phase, Phase::Waiting(Pending::Probe(_))) {
                 self.probe(i, p, now);
@@ -194,7 +243,7 @@ impl Core {
         }
         self.write_clients(p, now);
         let busy = self.units.iter().any(Unit::busy) || !self.clients.is_empty();
-        let next = self.units.iter().filter_map(Unit::deadline).chain([self.runner.next]).min();
+        let next = self.units.iter().filter_map(Unit::deadline).chain([self.runner.next, self.scheduler.next]).min();
         match next {
             Some(t) => t.saturating_sub(now).min(if busy { 5 } else { 50 }),
             None if busy => 5,
@@ -309,6 +358,9 @@ impl Core {
         }
         if let Some(response) = self.timer_route(route, r, p) {
             return Ok(response);
+        }
+        if let Some(answer) = self.program_route(route, r, p) {
+            return answer;
         }
         match route {
             Route::Health => Ok(Response::json(200, &Health { status: "ok" })),
@@ -653,11 +705,11 @@ impl Core {
                     Some(u) => {
                         let req = self.req();
                         self.units[u].control(req, timer.settings.change());
-                        self.jobs.push((req, unit));
+                        self.jobs.push(Job { req, unit, kind: JobKind::Timer });
                     }
                     None => {
                         self.runner.errors += 1;
-                        p.log(&alloc::format!("timer {} failed on unit {unit}: unit has no V3 token and key configured", timer.id));
+                        p.log(&alloc::format!("timer {} failed on unit {unit}: {NOT_A_UNIT}", timer.id));
                     }
                 }
             }
@@ -675,15 +727,233 @@ impl Core {
         self.runner.last_run = Some(clock::format(clock::seconds(now)));
     }
 
-    /// A timer's work on a unit came back.
-    fn count(&mut self, unit: u64, outcome: Outcome, p: &mut impl Platform) {
-        match outcome {
-            Outcome::Control(Ok(_)) => self.runner.fired += 1,
-            Outcome::Control(Err(e)) => {
+    /// A timer's or a program's work on a unit came back.
+    fn count(&mut self, job: Job, outcome: Outcome, p: &mut impl Platform) {
+        let Outcome::Control(result) = outcome else { return };
+        let unit = job.unit;
+        match (job.kind, result) {
+            (JobKind::Timer, Ok(_)) => self.runner.fired += 1,
+            (JobKind::Timer, Err(e)) => {
                 self.runner.errors += 1;
                 p.log(&alloc::format!("a timer failed on unit {unit}: {e}"));
             }
-            _ => {}
+            (JobKind::Schedule { .. }, Ok(_)) => {}
+            // Logged, not counted, as Breeze Core: an unplugged unit is normal.
+            (JobKind::Schedule { name }, Err(e)) => p.log(&alloc::format!("schedule '{name}' -> unit {unit} failed: {e}")),
+            (JobKind::Curve { program, name, temp }, Ok(_)) => {
+                // Only on success, so an unreachable unit is tried again.
+                self.scheduler.curve_applied.insert((program, unit.to_string()), temp);
+                p.log(&alloc::format!("curve '{name}' -> unit {unit} set {temp:.1}"));
+            }
+            (JobKind::Curve { name, .. }, Err(e)) => p.log(&alloc::format!("curve '{name}' -> unit {unit} failed: {e}")),
+        }
+    }
+
+    fn save_programs(&self, p: &mut impl Platform) -> Result<(), Response> {
+        p.write_file("programs.json", &crate::store::to_json(&self.programs), true)
+            .map_err(|e| Response::detail(500, &alloc::format!("cannot write the program store: {e}")))
+    }
+
+    /// `/api/programs`: `None` for any other route.
+    fn program_route(&mut self, route: Route, r: &http::Request, p: &mut impl Platform) -> Option<Result<Response, Pending>> {
+        let id = r.path.strip_prefix("/api/programs/").unwrap_or_default();
+        let missing = |id: &str| Response::detail(404, &alloc::format!("no program '{id}'"));
+        Some(Ok(match route {
+            Route::Programs => Response::json(200, &self.programs.programs),
+            Route::ProgramStatus => Response::json(
+                200,
+                &ProgramStatus {
+                    running: true,
+                    tick_seconds: self.settings.sched_tick.max(5),
+                    runs: self.scheduler.runs,
+                    errors: 0,
+                    last_run: self.scheduler.last_run.as_deref(),
+                },
+            ),
+            Route::ProgramGet => match self.programs.get(id) {
+                Some(program) => Response::json(200, program),
+                None => missing(id),
+            },
+            Route::ProgramCreate => {
+                let spec: ProgramSpec = match serde_json::from_slice(&r.body) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Ok(Response::detail(422, &alloc::format!("invalid program: {e}")))),
+                };
+                let mut bytes = [0u8; 6];
+                p.random(&mut bytes);
+                let program = match spec.into_program(bytes.iter().map(|b| alloc::format!("{b:02x}")).collect()) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Ok(Response::detail(422, &e))),
+                };
+                self.programs.programs.push(program.clone());
+                if let Err(e) = self.save_programs(p) {
+                    self.programs.programs.pop();
+                    return Some(Ok(e));
+                }
+                Response::json(201, &program)
+            }
+            Route::ProgramUpdate => {
+                let spec: ProgramSpec = match serde_json::from_slice(&r.body) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Ok(Response::detail(422, &alloc::format!("invalid program: {e}")))),
+                };
+                // Checked before it is looked for, as Breeze Core: a bad body
+                // is 422 whether or not the program exists.
+                let program = match spec.into_program(id.to_string()) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Ok(Response::detail(422, &e))),
+                };
+                let Some(slot) = self.programs.programs.iter().position(|q| q.id == id) else { return Some(Ok(missing(id))) };
+                let previous = core::mem::replace(&mut self.programs.programs[slot], program.clone());
+                if let Err(e) = self.save_programs(p) {
+                    self.programs.programs[slot] = previous;
+                    return Some(Ok(e));
+                }
+                Response::json(200, &program)
+            }
+            Route::ProgramDelete => {
+                let Some(slot) = self.programs.programs.iter().position(|q| q.id == id) else { return Some(Ok(missing(id))) };
+                let previous = self.programs.programs.remove(slot);
+                if let Err(e) = self.save_programs(p) {
+                    // Back at the end, as Breeze Core puts it back.
+                    self.programs.programs.push(previous);
+                    return Some(Ok(e));
+                }
+                Response { status: 204, body: Vec::new(), extra: Vec::new() }
+            }
+            Route::ProgramApply => {
+                let id = id.strip_suffix("/apply").unwrap_or_default();
+                let Some(program) = self.programs.get(id).cloned() else { return Some(Ok(missing(id))) };
+                let request = if program.is_curve() {
+                    match (&program.curve, clock::now(p)) {
+                        (None, _) => return Some(Ok(Response::detail(400, "curve has no points"))),
+                        (Some(_), None) => return Some(Ok(Response::detail(503, "the server does not know the time yet"))),
+                        (Some(curve), Some(now)) => programs::curve_request(curve, clock::seconds(now)),
+                    }
+                } else if program.is_schedule() {
+                    return Some(Ok(Response::detail(400, "schedule programs fire automatically; nothing to apply")));
+                } else {
+                    match program.favourite.clone() {
+                        Some(scene) => scene,
+                        None => return Some(Ok(Response::detail(400, "favourite has no settings"))),
+                    }
+                };
+                let mut rest = program.targets(self.units.iter().map(|u| u.id));
+                if rest.is_empty() {
+                    return Some(Ok(Response { status: 200, body: b"[]".to_vec(), extra: Vec::new() }));
+                }
+                let first = rest.remove(0);
+                return Some(self.apply_start(first, rest, request, Vec::new()).map_or_else(Err, Ok));
+            }
+            _ => return None,
+        }))
+    }
+
+    /// Send a program's request to the next unit, or answer if it is not
+    /// there. `Ok` is the answer, `Err` the wait.
+    fn apply_start(&mut self, unit: u64, rest: Vec<u64>, request: ControlRequest, done: Vec<Vec<u8>>) -> Result<Response, Pending> {
+        let Some(u) = self.units.iter().position(|x| x.id == unit) else {
+            return Ok(Response::detail(503, NOT_A_UNIT));
+        };
+        let req = self.req();
+        self.units[u].control(req, request.change());
+        Err(Pending::Apply(Box::new(Apply { current: (unit, req), rest, request, done })))
+    }
+
+    /// A unit of an apply answered: on to the next, or the answer.
+    fn apply_next(&mut self, unit: u64, outcome: Outcome, mut rest: Vec<u64>, request: ControlRequest, mut done: Vec<Vec<u8>>) -> Phase {
+        let writing = |r: Response| Phase::Writing { out: r.to_bytes(), at: 0 };
+        match outcome {
+            Outcome::Control(Ok((sent, echoed))) => {
+                let Some(u) = self.units.iter().find(|x| x.id == unit) else { return writing(Response::detail(503, NOT_A_UNIT)) };
+                let view = api::ControlView { state: UnitState::of(u, &echoed), not_applied: request.not_applied(&sent, &echoed) };
+                done.push(serde_json::to_vec(&view).unwrap_or_default());
+            }
+            Outcome::Control(Err(e)) => return writing(Response::detail(503, &e.to_string())),
+            _ => return writing(Response::detail(503, NOT_A_UNIT)),
+        }
+        if rest.is_empty() {
+            let mut body = b"[".to_vec();
+            body.extend_from_slice(&done.join(&b','));
+            body.push(b']');
+            return writing(Response { status: 200, body, extra: Vec::new() });
+        }
+        let next = rest.remove(0);
+        match self.apply_start(next, rest, request, done) {
+            Ok(response) => writing(response),
+            Err(pending) => Phase::Waiting(pending),
+        }
+    }
+
+    /// One pass over the enabled programs, sharing one reading of the clock.
+    fn run_scheduler(&mut self, p: &mut impl Platform) {
+        let Some(now) = clock::now(p) else { return };
+        let secs = clock::seconds(now);
+        let enabled: Vec<Program> = self.programs.programs.iter().filter(|q| q.enabled).cloned().collect();
+        for program in &enabled {
+            if program.is_schedule() {
+                self.run_schedule(program, secs, p);
+            } else if program.is_curve() {
+                self.run_curve(program, secs, p);
+            }
+        }
+        self.scheduler.runs += 1;
+        self.scheduler.last_run = Some(clock::format(secs));
+    }
+
+    fn run_schedule(&mut self, program: &Program, secs: i64, p: &mut impl Platform) {
+        let due = programs::due_entries(&program.schedule, secs);
+        if due.is_empty() {
+            return;
+        }
+        let stamp = programs::minute_stamp(secs);
+        for index in due {
+            // Claimed before it is applied, as Breeze Core: a trigger that
+            // fails does not retry for the rest of the minute.
+            let key = (program.id.clone(), index);
+            if self.scheduler.fired.get(&key) == Some(&stamp) {
+                continue;
+            }
+            self.scheduler.fired.insert(key, stamp.clone());
+            let entry = &program.schedule[index];
+            p.log(&alloc::format!("schedule '{}' firing ({})", program.name, entry.time));
+            for unit in program.targets(self.units.iter().map(|u| u.id)) {
+                self.issue(unit, &entry.settings, JobKind::Schedule { name: program.name.clone() }, p);
+            }
+        }
+    }
+
+    fn run_curve(&mut self, program: &Program, secs: i64, p: &mut impl Platform) {
+        let Some(curve) = &program.curve else { return };
+        let request = programs::curve_request(curve, secs);
+        // No points, nothing to track (applying it by hand still switches on).
+        let Some(temp) = request.target_temperature else { return };
+        for unit in program.targets(self.units.iter().map(|u| u.id)) {
+            let key = programs::key(program, unit);
+            if self.scheduler.curve_applied.get(&key) == Some(&temp) {
+                continue;
+            }
+            // Still on its way from the last pass.
+            if self.jobs.iter().any(|j| j.unit == unit && matches!(&j.kind, JobKind::Curve { program: id, .. } if *id == program.id)) {
+                continue;
+            }
+            self.issue(unit, &request, JobKind::Curve { program: program.id.clone(), name: program.name.clone(), temp }, p);
+        }
+    }
+
+    /// Hand a program's request to a unit, for nobody to wait on.
+    fn issue(&mut self, unit: u64, request: &ControlRequest, kind: JobKind, p: &mut impl Platform) {
+        match self.units.iter().position(|u| u.id == unit) {
+            Some(u) => {
+                let req = self.req();
+                self.units[u].control(req, request.change());
+                self.jobs.push(Job { req, unit, kind });
+            }
+            None => match kind {
+                JobKind::Schedule { name } => p.log(&alloc::format!("schedule '{name}' -> unit {unit} failed: {NOT_A_UNIT}")),
+                JobKind::Curve { name, .. } => p.log(&alloc::format!("curve '{name}' -> unit {unit} failed: {NOT_A_UNIT}")),
+                JobKind::Timer => {}
+            },
         }
     }
 
@@ -691,9 +961,9 @@ impl Core {
     /// replaced: its work will not finish.
     fn abandon(&mut self, id: u64) {
         // A timer's work on it will not be answered either: a failure.
-        let before = self.jobs.len();
-        self.jobs.retain(|(_, unit)| *unit != id);
-        self.runner.errors += (before - self.jobs.len()) as u64;
+        let lost = self.jobs.iter().filter(|j| j.unit == id && matches!(j.kind, JobKind::Timer)).count();
+        self.jobs.retain(|j| j.unit != id);
+        self.runner.errors += lost as u64;
         for c in self.clients.iter_mut() {
             if matches!(&c.phase, Phase::Waiting(pending) if pending.unit(id)) {
                 let r = Response::detail(503, "the unit was removed or replaced while this request waited");
@@ -818,10 +1088,19 @@ impl Core {
                 *r == req
             }
             Phase::Waiting(Pending::Batch { parts }) => parts.iter().any(|(_, r, _)| *r == req),
+            Phase::Waiting(Pending::Apply(a)) => a.current.1 == req,
             _ => false,
         }) else {
             return;
         };
+        if matches!(self.clients[i].phase, Phase::Waiting(Pending::Apply(_))) {
+            let Phase::Waiting(Pending::Apply(a)) = core::mem::replace(&mut self.clients[i].phase, Phase::Reading) else {
+                return;
+            };
+            let Apply { current, rest, request, done } = *a;
+            self.clients[i].phase = self.apply_next(current.0, outcome, rest, request, done);
+            return;
+        }
         let Phase::Waiting(pending) = &mut self.clients[i].phase else { return };
         let units = &self.units;
         let find = |id: u64| units.iter().find(|u| u.id == id);
@@ -905,6 +1184,18 @@ impl Core {
 
 fn unit_from(u: &UnitConfig, timing: Timing) -> Unit {
     Unit::new(u.id as u64, u.name.clone(), u.ip.clone(), u.port, u.token.as_deref(), u.key.as_deref(), timing)
+}
+
+/// What Breeze Core says of a unit id it does not have.
+const NOT_A_UNIT: &str = "unit has no V3 token and key configured";
+
+#[derive(serde::Serialize)]
+struct ProgramStatus<'a> {
+    running: bool,
+    tick_seconds: u64,
+    runs: u64,
+    errors: u64,
+    last_run: Option<&'a str>,
 }
 
 #[derive(serde::Serialize)]

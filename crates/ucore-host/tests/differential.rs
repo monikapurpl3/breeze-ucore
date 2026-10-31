@@ -266,6 +266,14 @@ fn check_sleep(t: &Value, minutes: i64) {
     assert!((minutes * 60 - 5..=minutes * 60).contains(&left), "{t}");
 }
 
+/// A list of unit states, each without the room temperature.
+fn steady_list(v: &Value) -> Value {
+    match v.as_array() {
+        Some(list) => Value::Array(list.iter().map(steady).collect()),
+        None => v.clone(),
+    }
+}
+
 fn local_now() -> chrono::NaiveDateTime {
     chrono::Local::now().naive_local()
 }
@@ -351,6 +359,7 @@ fn ucore_answers_as_breeze_core_does() {
             .env("BREEZE_PORT", real.to_string())
             .env("BREEZE_LOG", "0")
             .env("AC_TIMER_TICK", "3600")
+            .env("AC_SCHED_TICK", "3600")
             .stderr(Stdio::null())
             .spawn()
             .unwrap(),
@@ -361,6 +370,7 @@ fn ucore_answers_as_breeze_core_does() {
             .env("BREEZE_HOST", "127.0.0.1")
             .env("BREEZE_PORT", ucore.to_string())
             .env("AC_TIMER_TICK", "3600")
+            .env("AC_SCHED_TICK", "3600")
             .stderr(Stdio::null())
             .spawn()
             .unwrap(),
@@ -655,6 +665,121 @@ fn ucore_answers_as_breeze_core_does() {
         failures.push(format!("timers.json, emptied\n   real  {}\n   ucore {}", String::from_utf8_lossy(&rj), String::from_utf8_lossy(&uj)));
     }
 
+    // ------------------------------------------------------------- programs
+    let long_name = "x".repeat(65);
+    let program_refusals: Vec<(&str, String, String)> = vec![
+        ("GET", "/api/programs".into(), String::new()),
+        ("GET", "/api/programs/status".into(), String::new()),
+        ("PATCH", "/api/programs".into(), String::new()),
+        ("GET", "/api/programs/nope".into(), String::new()),
+        ("PATCH", "/api/programs/nope".into(), String::new()),
+        ("DELETE", "/api/programs/nope".into(), String::new()),
+        ("PUT", "/api/programs/nope".into(), r#"{"name": "Valid"}"#.into()),
+        ("PUT", "/api/programs/nope".into(), r#"{"name": ""}"#.into()),
+        ("POST", "/api/programs/nope/apply".into(), String::new()),
+        ("GET", "/api/programs/nope/apply".into(), String::new()),
+        ("POST", "/api/programs//apply".into(), String::new()),
+        ("GET", "/api/programs/a/b".into(), String::new()),
+        ("POST", "/api/programs".into(), "nope".into()),
+        ("POST", "/api/programs".into(), String::new()),
+        ("POST", "/api/programs".into(), "{}".into()),
+        ("POST", "/api/programs".into(), r#"{"name": ""}"#.into()),
+        ("POST", "/api/programs".into(), format!(r#"{{"name": "{long_name}"}}"#)),
+        ("POST", "/api/programs".into(), r#"{"name": "x", "enabled": "yes"}"#.into()),
+        ("POST", "/api/programs".into(), r#"{"name": "x", "kind": "macro"}"#.into()),
+        ("POST", "/api/programs".into(), r#"{"name": "x", "kind": "schedule", "schedule": [{"days": [7], "time": "07:30", "settings": {}}]}"#.into()),
+        ("POST", "/api/programs".into(), r#"{"name": "x", "kind": "schedule", "schedule": [{"days": [300], "time": "07:30", "settings": {}}]}"#.into()),
+        ("POST", "/api/programs".into(), r#"{"name": "x", "kind": "schedule", "schedule": [{"time": "7:30", "settings": {}}]}"#.into()),
+        ("POST", "/api/programs".into(), r#"{"name": "x", "kind": "schedule", "schedule": [{"time": "24:00", "settings": {}}]}"#.into()),
+        ("POST", "/api/programs".into(), r#"{"name": "x", "kind": "schedule", "schedule": [{"time": "07:30"}]}"#.into()),
+        ("POST", "/api/programs".into(), r#"{"name": "x", "kind": "schedule", "schedule": [{"time": "07:30", "settings": {"swing_mode": "up"}}]}"#.into()),
+        ("POST", "/api/programs".into(), r#"{"name": "x", "kind": "curve", "curve": {"operational_mode": "warp"}}"#.into()),
+        ("POST", "/api/programs".into(), r#"{"name": "x", "kind": "curve", "curve": {"fan_speed": 7}}"#.into()),
+        ("POST", "/api/programs".into(), r#"{"name": "x", "kind": "curve", "curve": {"points": [{"time": "06:00", "temperature": 31.5}]}}"#.into()),
+        ("POST", "/api/programs".into(), r#"{"name": "x", "kind": "curve", "curve": {"points": [{"time": "6:00", "temperature": 20}]}}"#.into()),
+        ("POST", "/api/programs".into(), r#"{"name": "x", "favourite": {"fan_speed": 7}}"#.into()),
+        ("POST", "/api/programs".into(), r#"{"name": "x", "favourite": {"target_temperature": 15}}"#.into()),
+    ];
+    for (method, path, body) in &program_refusals {
+        compare_exact(&mut failures, real, ucore, method, path, &AUTH, body);
+    }
+    // Stored programs: compared with their ids masked, per server's own ids.
+    let specs = [
+        format!(r#"{{"name": "Cosy", "unit_ids": ["{alpha}"], "favourite": {{"power_state": true, "operational_mode": "heat", "target_temperature": 23}}}}"#),
+        format!(r#"{{"name": "Week", "kind": "schedule", "unit_ids": ["{bravo}"], "schedule": [{{"days": [4, 0, 4], "time": "07:30", "settings": {{"power_state": true}}}}]}}"#),
+        format!(r#"{{"name": "Warm", "kind": "curve", "unit_ids": ["{alpha}"], "curve": {{"operational_mode": "heat", "fan_speed": 60, "points": [{{"time": "06:00", "temperature": 21}}, {{"time": "22:00", "temperature": 18.5}}]}}}}"#),
+        r#"{"name": "Empty"}"#.to_string(),
+        format!(r#"{{"name": "Flat", "kind": "curve", "unit_ids": ["{alpha}"], "curve": {{}}}}"#),
+        r#"{"name": "Bare curve", "kind": "curve"}"#.to_string(),
+        r#"{"name": "Everyone", "enabled": false, "favourite": {"power_state": true}}"#.to_string(),
+        r#"{"name": "Nobody", "unit_ids": ["999"], "favourite": {"power_state": true}}"#.to_string(),
+    ];
+    let mut ids_of: Vec<(String, String)> = Vec::new();
+    for body in &specs {
+        let (r, u) = (call(real, "POST", "/api/programs", &AUTH, body), call(ucore, "POST", "/api/programs", &AUTH, body));
+        let (rt, ut) = (String::from_utf8_lossy(&r.body).into_owned(), String::from_utf8_lossy(&u.body).into_owned());
+        if (r.status, r.comparable_headers(), mask(&rt)) != (u.status, u.comparable_headers(), mask(&ut)) {
+            failures.push(format!("POST /api/programs {body}\n   real  {} {rt}\n   ucore {} {ut}", r.status, u.status));
+        }
+        ids_of.push((r.json()["id"].as_str().unwrap_or("").into(), u.json()["id"].as_str().unwrap_or("").into()));
+    }
+    let pair = |n: usize| ids_of[n].clone();
+    for n in 0..specs.len() {
+        let (rid, uid) = pair(n);
+        let (r, u) = (call(real, "GET", &format!("/api/programs/{rid}"), &AUTH, ""), call(ucore, "GET", &format!("/api/programs/{uid}"), &AUTH, ""));
+        if (r.status, mask(&String::from_utf8_lossy(&r.body))) != (u.status, mask(&String::from_utf8_lossy(&u.body))) {
+            failures.push(format!("GET /api/programs/{{id}} #{n}\n   real  {}\n   ucore {}", String::from_utf8_lossy(&r.body), String::from_utf8_lossy(&u.body)));
+        }
+    }
+    let update = format!(r#"{{"name": "Cosier", "unit_ids": ["{alpha}"], "favourite": {{"power_state": true, "operational_mode": "HEAT", "target_temperature": 23.5, "fan_speed": 40}}}}"#);
+    for (method, n, suffix, body) in [
+        ("PUT", 0usize, "", update.as_str()),
+        ("PUT", 0, "", r#"{"name": "x", "kind": "macro"}"#),
+        // Apply: a schedule and an empty favourite refuse; the rest apply,
+        // unit by unit, and one that cannot be reached fails the request.
+        ("POST", 1, "/apply", ""),
+        ("POST", 3, "/apply", ""),
+        ("POST", 5, "/apply", ""),
+        ("POST", 7, "/apply", ""),
+    ] {
+        let (rid, uid) = pair(n);
+        let (r, u) = (call(real, method, &format!("/api/programs/{rid}{suffix}"), &AUTH, body), call(ucore, method, &format!("/api/programs/{uid}{suffix}"), &AUTH, body));
+        let (rt, ut) = (String::from_utf8_lossy(&r.body).into_owned(), String::from_utf8_lossy(&u.body).into_owned());
+        if (r.status, r.comparable_headers(), mask(&rt)) != (u.status, u.comparable_headers(), mask(&ut)) {
+            failures.push(format!("{method} /api/programs/{{id}}{suffix} (#{n}) {body}\n   real  {} {rt}\n   ucore {} {ut}", r.status, u.status));
+        }
+    }
+    // Applied for real: the readings move, so compared steady.
+    for n in [0usize, 2, 4, 6] {
+        let (rid, uid) = pair(n);
+        let (r, u) = (call(real, "POST", &format!("/api/programs/{rid}/apply"), &AUTH, ""), call(ucore, "POST", &format!("/api/programs/{uid}/apply"), &AUTH, ""));
+        if r.status != u.status || steady_list(&r.json()) != steady_list(&u.json()) {
+            failures.push(format!("POST /api/programs/{{id}}/apply (#{n})\n   real  {} {}\n   ucore {} {}", r.status, r.json(), u.status, u.json()));
+        }
+        if n == 0 {
+            let a = &u.json()[0];
+            assert_eq!((&a["operational_mode"], &a["target_temperature"], &a["fan_speed"]), (&json!("HEAT"), &json!(23.5), &json!(40)), "{a}");
+        }
+    }
+    let (rp, up) = (std::fs::read_to_string(real_dir.join("programs.json")).unwrap(), std::fs::read_to_string(ucore_dir.join("programs.json")).unwrap());
+    if mask(&rp) != mask(&up) {
+        failures.push(format!("programs.json\n   real  {rp}\n   ucore {up}"));
+    }
+    for (rid, uid) in &ids_of {
+        for _ in 0..2 {
+            let (r, u) = (call(real, "DELETE", &format!("/api/programs/{rid}"), &AUTH, ""), call(ucore, "DELETE", &format!("/api/programs/{uid}"), &AUTH, ""));
+            // The 404 names the id asked about, and each server made its own.
+            let ub = String::from_utf8_lossy(&u.body).replace(uid.as_str(), rid);
+            if (r.status, String::from_utf8_lossy(&r.body).into_owned()) != (u.status, ub) {
+                failures.push(format!("DELETE /api/programs/{{id}}\n   real  {} {}\n   ucore {} {}", r.status, String::from_utf8_lossy(&r.body), u.status, String::from_utf8_lossy(&u.body)));
+            }
+        }
+    }
+    let (rp, up) = (std::fs::read(real_dir.join("programs.json")).unwrap(), std::fs::read(ucore_dir.join("programs.json")).unwrap());
+    if rp != up {
+        failures.push(format!("programs.json, emptied\n   real  {}\n   ucore {}", String::from_utf8_lossy(&rp), String::from_utf8_lossy(&up)));
+    }
+
     // ------------------------------------------------------- the configuration
     // Everything short of probing an address (which needs units on a private
     // network: the Linux run does that). Last, since it changes the units.
@@ -758,6 +883,82 @@ fn ucore_answers_as_breeze_core_does() {
     assert_eq!(counts(&u.1), (json!(1), json!(1), json!(1), json!("2099-01-01T10:00:00"), json!(1)), "{}", u.1);
     if r.2 != u.2 {
         failures.push(format!("timers.json after firing\n   real  {}\n   ucore {}", r.2, u.2));
+    }
+
+    // ------------------------------------------------------ the scheduler
+    // Each server in turn, from one programs.json, with a five-second tick:
+    // a schedule entry for this minute (and the next, should the minute turn)
+    // fires on Bravo, a curve sets Alpha, and a disabled program does nothing.
+    let mut runs = Vec::new();
+    for (name, port) in [("real", 29321u16), ("ucore", 29322u16)] {
+        let via = if name == "real" { real } else { ucore };
+        call(via, "POST", &format!("/api/units/{alpha}/control"), &AUTH, r#"{"power_state": false, "operational_mode": "HEAT", "target_temperature": 22}"#);
+        call(via, "POST", &format!("/api/units/{bravo}/control"), &AUTH, r#"{"power_state": false, "operational_mode": "COOL"}"#);
+        let dir = work.join(format!("sched-{name}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), &fire_cfg).unwrap();
+        devices_json(&dir);
+        let hm = |plus: i64| (local_now() + chrono::TimeDelta::minutes(plus)).format("%H:%M").to_string();
+        let null = Value::Null;
+        let settings = |extra: Value| {
+            let mut s = json!({"power_state": null, "operational_mode": null, "target_temperature": null, "fan_speed": null, "swing_mode": null, "eco": null, "turbo": null, "beep": null});
+            for (k, v) in extra.as_object().unwrap() {
+                s[k] = v.clone();
+            }
+            s
+        };
+        let fan_on = settings(json!({"power_state": true, "operational_mode": "FAN_ONLY"}));
+        let seed = json!({"programs": [
+            {"name": "Fan", "enabled": true, "unit_ids": [bravo.trim_matches('"')], "kind": "schedule", "favourite": null,
+             "schedule": [{"days": [], "time": hm(0), "settings": fan_on}, {"days": [], "time": hm(1), "settings": fan_on}], "curve": null, "id": "00000000aa01"},
+            {"name": "Flat 25", "enabled": true, "unit_ids": [alpha.trim_matches('"')], "kind": "curve", "favourite": null, "schedule": [],
+             "curve": {"operational_mode": "COOL", "fan_speed": 102, "points": [{"time": "00:00", "temperature": 25.0}]}, "id": "00000000aa02"},
+            {"name": "Off", "enabled": false, "unit_ids": [alpha.trim_matches('"')], "kind": "schedule", "favourite": null,
+             "schedule": [{"days": [], "time": hm(0), "settings": settings(json!({"power_state": false}))}], "curve": null, "id": "00000000aa03"},
+        ]});
+        let _ = &null;
+        let seeded = serde_json::to_string_pretty(&seed).unwrap();
+        std::fs::write(dir.join("programs.json"), &seeded).unwrap();
+        let bin = if name == "real" { core_bin.clone() } else { ucore_bin() };
+        let server = Kill(
+            Command::new(&bin)
+                .arg("serve")
+                .env("AC_CONFIG_DIR", &dir)
+                .env("BREEZE_HOST", "127.0.0.1")
+                .env("BREEZE_PORT", port.to_string())
+                .env("BREEZE_LOG", "0")
+                .env("AC_SCHED_TICK", "1")
+                .env("AC_TIMER_TICK", "3600")
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        wait_for(port, name);
+        let deadline = Instant::now() + Duration::from_secs(25);
+        let (a, b, status) = loop {
+            std::thread::sleep(Duration::from_millis(500));
+            let a = call(port, "GET", &format!("/api/units/{alpha}/state"), &AUTH, "").json();
+            let b = call(port, "GET", &format!("/api/units/{bravo}/state"), &AUTH, "").json();
+            let status = call(port, "GET", "/api/programs/status", &AUTH, "").json();
+            let settled = a["target_temperature"] == json!(25.0) && b["operational_mode"] == json!("FAN_ONLY");
+            if settled || Instant::now() > deadline {
+                break (a, b, status);
+            }
+        };
+        let left = std::fs::read_to_string(dir.join("programs.json")).unwrap();
+        drop(server);
+        assert_eq!(
+            (&a["power_state"], &a["operational_mode"], &a["target_temperature"], &a["fan_speed"]),
+            (&json!(true), &json!("COOL"), &json!(25.0), &json!(102)),
+            "{name}: the curve set alpha, and the disabled program did not switch it off: {a}"
+        );
+        assert_eq!((&b["power_state"], &b["operational_mode"]), (&json!(true), &json!("FAN_ONLY")), "{name}: the schedule fired: {b}");
+        assert_eq!(left, seeded, "{name}: the scheduler does not write programs.json");
+        runs.push(status);
+    }
+    let shape_of = |s: &Value| (s["running"].clone(), s["tick_seconds"].clone(), s["errors"].clone(), s["runs"].as_u64().unwrap_or(0) > 0, s["last_run"].is_string());
+    if shape_of(&runs[0]) != shape_of(&runs[1]) || mask(&runs[0].to_string()) != mask(&runs[1].to_string()) {
+        failures.push(format!("the scheduler's status\n   real  {}\n   ucore {}", runs[0], runs[1]));
     }
 
     assert!(failures.is_empty(), "{} difference(s):\n{}", failures.len(), failures.join("\n"));

@@ -17,6 +17,7 @@ pub const FEATURES: &[&str] = &[
     "delete_unit",
     "device_pairing",
     "ed25519_auth",
+    "programs",
     "sleep_timer",
     "timer_at",
     "unit_capabilities",
@@ -62,6 +63,13 @@ pub enum Route {
     TimerCreate,
     TimerStatus,
     TimerCancel,
+    Programs,
+    ProgramCreate,
+    ProgramStatus,
+    ProgramGet,
+    ProgramUpdate,
+    ProgramDelete,
+    ProgramApply,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,9 +102,9 @@ pub fn resolve(method: &str, path: &str) -> Resolved {
         ("GET", "/api/timers/status", Full, Some(Route::TimerStatus)),
         ("GET", "/api/timers", Full, Some(Route::Timers)),
         ("POST", "/api/timers", Full, Some(Route::TimerCreate)),
-        ("GET", "/api/programs/status", Full, None),
-        ("GET", "/api/programs", Full, None),
-        ("POST", "/api/programs", Full, None),
+        ("GET", "/api/programs/status", Full, Some(Route::ProgramStatus)),
+        ("GET", "/api/programs", Full, Some(Route::Programs)),
+        ("POST", "/api/programs", Full, Some(Route::ProgramCreate)),
     ];
     if path == "/api/units/stream" || path == "/api/units/scan" {
         return Resolved::NotFound;
@@ -116,6 +124,24 @@ pub fn resolve(method: &str, path: &str) -> Resolved {
             return Resolved::NotFound;
         }
         return if method == "DELETE" { Resolved::Route(Full, Route::TimerCancel) } else { Resolved::MethodNotAllowed("DELETE") };
+    }
+    if let Some(rest) = path.strip_prefix("/api/programs/") {
+        // "{id}" or "{id}/apply", nothing else.
+        if let Some(id) = rest.strip_suffix("/apply") {
+            if id.is_empty() || id.contains('/') {
+                return Resolved::NotFound;
+            }
+            return if method == "POST" { Resolved::Route(Full, Route::ProgramApply) } else { Resolved::MethodNotAllowed("POST") };
+        }
+        if rest.is_empty() || rest.contains('/') {
+            return Resolved::NotFound;
+        }
+        return match method {
+            "GET" => Resolved::Route(Full, Route::ProgramGet),
+            "PUT" => Resolved::Route(Full, Route::ProgramUpdate),
+            "DELETE" => Resolved::Route(Full, Route::ProgramDelete),
+            _ => Resolved::MethodNotAllowed("GET"),
+        };
     }
     if let Some(token_id) = path.strip_prefix("/api/auth/devices/") {
         if token_id.is_empty() || token_id.contains('/') {
@@ -537,6 +563,11 @@ mod tests {
         assert_eq!(resolve("GET", "/api/timers/status"), Resolved::Route(Guard::Full, Route::TimerStatus));
         assert_eq!(resolve("GET", "/api/timers/abc"), Resolved::MethodNotAllowed("DELETE"));
         assert_eq!(resolve("DELETE", "/api/timers/a/b"), Resolved::NotFound);
+        assert_eq!(resolve("PUT", "/api/programs/p1"), Resolved::Route(Guard::Full, Route::ProgramUpdate));
+        assert_eq!(resolve("PATCH", "/api/programs/p1"), Resolved::MethodNotAllowed("GET"));
+        assert_eq!(resolve("GET", "/api/programs/p1/apply"), Resolved::MethodNotAllowed("POST"));
+        assert_eq!(resolve("POST", "/api/programs//apply"), Resolved::NotFound);
+        assert_eq!(resolve("GET", "/api/programs/a/b"), Resolved::NotFound);
     }
 
     #[test]

@@ -185,6 +185,7 @@ fn settings() -> ucore::Settings {
         token_ttl_days: var("AC_TOKEN_TTL_DAYS").unwrap_or(d.token_ttl_days),
         auth_skew: var("AC_AUTH_SKEW_SECONDS").unwrap_or(d.auth_skew),
         timer_tick: var("AC_TIMER_TICK").unwrap_or(d.timer_tick),
+        sched_tick: var("AC_SCHED_TICK").unwrap_or(d.sched_tick),
         ..d
     }
 }

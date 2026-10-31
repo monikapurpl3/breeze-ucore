@@ -16,6 +16,7 @@ pub mod clock;
 mod server;
 pub mod http;
 pub mod platform;
+pub mod programs;
 pub mod proto;
 pub mod store;
 pub mod timers;
