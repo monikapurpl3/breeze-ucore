@@ -206,11 +206,8 @@ impl Tools {
         let url = format!("https://github.com/esp-rs/espflash/releases/download/{ESPFLASH_VERSION}/espflash-{plat}.zip");
         let bytes = net::download(log, &url, "espflash, to make flash images", pinned(ESPFLASH_SHA256, plat))?;
         say.line("Unpacking espflash...");
-        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| format!("espflash: {e}"))?;
-        let mut file = zip.by_name(&format!("espflash{EXE}")).map_err(|e| format!("espflash: {e}"))?;
-        let mut out = std::fs::File::create(self.espflash()).map_err(|e| e.to_string())?;
-        std::io::copy(&mut file, &mut out).map_err(|e| e.to_string())?;
-        drop(out);
+        let program = unzip_one(bytes, &format!("espflash{EXE}")).map_err(|e| format!("espflash: {e}"))?;
+        std::fs::write(self.espflash(), program).map_err(|e| e.to_string())?;
         executable(&self.espflash())
     }
 
@@ -250,6 +247,17 @@ impl Tools {
             say,
         )
     }
+}
+
+/// One file out of a zip archive, by its name, read into memory: nothing is
+/// written where the archive says.
+fn unzip_one(bytes: Vec<u8>, name: &str) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
+    let mut file = zip.by_name(name).map_err(|e| format!("{name}: {e}"))?;
+    let mut out = Vec::new();
+    file.by_ref().take(256 << 20).read_to_end(&mut out).map_err(|e| e.to_string())?;
+    Ok(out)
 }
 
 fn executable(path: &Path) -> Result<(), String> {
@@ -363,6 +371,21 @@ pub fn region(image: &Path, offset: u64, size: u64) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn one_file_comes_out_of_a_zip() {
+        use std::io::Write;
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        zip.start_file("README", opts).unwrap();
+        zip.write_all(b"not this").unwrap();
+        zip.start_file("espflash", opts).unwrap();
+        zip.write_all(b"the program").unwrap();
+        let bytes = zip.finish().unwrap().into_inner();
+        assert_eq!(super::unzip_one(bytes.clone(), "espflash").unwrap(), b"the program");
+        assert!(super::unzip_one(bytes, "espflash.exe").is_err());
+        assert!(super::unzip_one(b"not a zip".to_vec(), "espflash").is_err());
+    }
+
     #[test]
     fn partitions_are_read_from_the_table() {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();

@@ -23,7 +23,7 @@ toml = "0.8"
 getrandom = "0.2"
 flate2 = "1"
 tar = "0.4"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.5", default-features = false, features = ["deflate"] }
 # 3.4: 3.5 goes through Grand Central Dispatch on macOS, and so needs the
 # Objective-C runtime and Foundation, which a cross-build has not got.
 ctrlc = "~3.4"
