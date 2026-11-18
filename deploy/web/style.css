@@ -71,6 +71,7 @@ main { max-width: 960px; margin: 0 auto; padding: 16px; }
   font-size: 0.9rem;
 }
 .pill.ok { color: var(--ok); border-color: var(--ok); }
+.pill.lost { color: var(--bad); border-color: var(--bad); }
 .hint { color: var(--muted); }
 .error { color: var(--bad); min-height: 0; margin: 4px 0 0; }
 .notice { border-left: 4px solid var(--accent); padding-left: 12px; }

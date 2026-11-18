@@ -36,6 +36,10 @@ irm https://aspic.salataputarica.hr.eu.org/ucore-deploy/run.ps1 | iex       # Wi
 | `--source DIR` | μCore's source to build (`github`: download it even from a checkout) |
 | `--data DIR` | where deployments and tools are kept |
 
+With `--aspic`, Chrome first asks whether the page may connect to apps on
+this computer: the helper is the app, so allow it. The helper's own page needs
+no such permission.
+
 Deployments and the build tools it installs are kept in its own folder:
 `%LOCALAPPDATA%\ucore-deploy`, `~/.local/share/ucore-deploy`, or
 `~/Library/Application Support/ucore-deploy`. Nothing is added to the PATH.

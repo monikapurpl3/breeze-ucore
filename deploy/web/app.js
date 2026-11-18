@@ -28,16 +28,66 @@ const session = (() => {
   if (location.hash) history.replaceState(null, '', location.pathname + location.search);
   const local = location.protocol === 'http:' && (location.hostname === '127.0.0.1' || location.hostname === 'localhost');
   const base = local ? '' : 'http://127.0.0.1:' + (Number(port) || 47820);
-  return { token, base };
+  return { token, base, local };
 })();
 
+// The helper stopped, or this link is from an earlier run of it (every run
+// has its own key). Nothing on the page can work after either: say so once,
+// show how to start it, and stop asking. Before this, a page left open kept
+// polling a helper that was gone, once a second, while its pill still said
+// the helper was there.
+let started = false;
+let lost = false;
+let connectionsTimer = null;
+function lose(why, unreached) {
+  if (lost) return;
+  lost = true;
+  clearInterval(connectionsTimer);
+  const pill = $('helper');
+  pill.textContent = why;
+  pill.classList.remove('ok');
+  pill.classList.add('lost');
+  // A page from aspic reaches the helper only if the browser lets it; once it
+  // has, that is not what went wrong.
+  if (unreached && !started && !session.local) $('no-helper-permission').hidden = false;
+  $('no-helper').hidden = false;
+}
+
+// A page from aspic reaches the helper on 127.0.0.1 only with the browser's
+// leave: Chrome asks the person first (Local Network Access; the permission
+// is "loopback-network", earlier "local-network-access"), holds the request
+// until they answer, and fails it at once if they said no. Returns 'granted',
+// 'prompt' or 'denied', or '' where the browser has no such permission.
+async function reachPermission() {
+  if (session.local) return 'granted';
+  for (const name of ['loopback-network', 'local-network-access']) {
+    try {
+      return (await navigator.permissions.query({ name })).state;
+    } catch (_) { /* not this browser's name for it */ }
+  }
+  return '';
+}
+
 async function api(method, path, body) {
+  if (lost) throw new Error('The helper is not answering.');
   const init = { method, headers: { Authorization: 'Bearer ' + session.token } };
   if (body !== undefined) {
     init.headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(body);
   }
-  const r = await fetch(session.base + '/api/' + path, init);
+  let r;
+  try {
+    r = await fetch(session.base + '/api/' + path, init);
+  } catch (_) {
+    // Before the first answer, the start below says why (it may be the
+    // browser's permission, not the helper).
+    if (started) lose('The helper stopped', true);
+    throw new Error('The helper is not answering.');
+  }
+  if (r.status === 401) {
+    lose('This link is from an earlier run of the helper');
+    throw new Error('This link is from an earlier run of the helper.');
+  }
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.error || ('the helper answered ' + r.status));
   return data;
@@ -373,7 +423,7 @@ function watchSerial() {
   serialSince = 0;
   $('serial').textContent = '';
   const tick = async () => {
-    if (!current || current.id !== serialFor) return;
+    if (lost || !current || current.id !== serialFor) return;
     try {
       const s = await api('GET', 'deployments/' + current.id + '/serial?since=' + serialSince);
       if (s.length < serialSince) $('serial').textContent = '';
@@ -386,8 +436,8 @@ function watchSerial() {
         current = await api('GET', 'deployments/' + current.id);
         render();
       }
-    } catch (_) { /* the helper pill says */ }
-    setTimeout(tick, 1000);
+    } catch (_) { /* lose() has said so, if that is what it was */ }
+    if (!lost) setTimeout(tick, 1000);
   };
   tick();
 }
@@ -400,8 +450,12 @@ function watchSerial() {
     $('no-helper').hidden = false;
     return;
   }
+  if (await reachPermission() === 'prompt') {
+    $('helper').textContent = 'Your browser will ask if this page may connect to apps on this computer: allow it, to reach the helper';
+  }
   try {
     const hello = await api('GET', 'hello');
+    started = true;
     $('helper').textContent = 'Helper ' + hello.version + ' on this computer';
     $('helper').classList.add('ok');
     $('data-dir').textContent = hello.data;
@@ -409,9 +463,11 @@ function watchSerial() {
     boardOptions($('new-board'));
     await showList();
     refreshConnections();
-    setInterval(refreshConnections, 4000);
+    connectionsTimer = setInterval(refreshConnections, 4000);
   } catch (e) {
-    $('helper').textContent = 'The helper did not answer';
-    $('no-helper').hidden = false;
+    const reach = await reachPermission();
+    if (reach === 'denied') lose('Your browser does not let this page connect to apps on this computer', true);
+    else if (reach === 'prompt') lose('Your browser asked, and got no answer: reload the page to be asked again', true);
+    else lose('The helper did not answer', !session.local);
   }
 })();

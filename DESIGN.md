@@ -235,3 +235,17 @@ It is also made checkable rather than promised:
   origin or aspic's, with a token it hands the page when it opens it), and
   keeps each deployment's files (secrets included) in its own folder,
   readable by the user alone.
+
+**aspic's copy needs the browser's leave.** A public https page reaching
+`127.0.0.1` is what Chrome's Local Network Access guards: Chrome 157 asks the
+person first (the permission is `loopback-network`), holds the request until
+they answer, and fails it at once after a no. Measured 2026-11-18 in
+Chrome 157: granted, the page works (CSP, CORS and the http call from an
+https page all pass); refused, the request fails with "Permission was denied
+for this request to access the `loopback` address space". So the page asks
+the browser for the permission's state and names it: that the browser is
+about to ask, that it was refused, or that the question was closed unanswered,
+rather than calling a running helper "not running". The helper's own page
+needs no permission, which is why the helper opens that one unless told
+`--aspic`. A page left open also stops asking once the helper is gone (it
+used to poll once a second, forever, while saying the helper was there).
