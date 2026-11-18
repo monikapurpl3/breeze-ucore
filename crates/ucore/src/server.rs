@@ -5,7 +5,6 @@ use crate::api::{self, ControlRequest, Envelope, Guard, Resolved, Route, UnitOff
 use crate::auth;
 use crate::http::{self, Parsed, Response};
 use crate::platform::{Conn, NetKind, Platform};
-use crate::proto::discover::{self, Discovered};
 use crate::store::{AppConfig, DevicesDoc, UnitConfig};
 use crate::programs::{self, Program, ProgramSpec, ProgramsDoc};
 use crate::timers::{self, Timer, TimerRequest, TimersDoc, When};
@@ -15,10 +14,7 @@ use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::net::{IpAddr, Ipv4Addr};
-
-/// How long adding a unit listens for it to answer the hello, as Breeze Core.
-const PROBE_LISTEN_MS: u64 = 3_000;
+use core::net::IpAddr;
 
 /// Clients served at once; the rest wait in the platform's backlog.
 pub const MAX_CLIENTS: usize = 4;
@@ -83,7 +79,6 @@ enum Pending {
     Control { unit: u64, req: ReqId, request: ControlRequest },
     Batch { parts: Vec<(u64, ReqId, Option<Outcome>)> },
     /// Adding a unit: the hello is out, replies are being collected.
-    Probe(Box<Probe>),
     /// A program applied now: one unit after another, as Breeze Core does,
     /// stopping at the first that fails.
     Apply(Box<Apply>),
@@ -97,26 +92,6 @@ struct Apply {
     request: ControlRequest,
     /// The units' answers so far, serialised.
     done: Vec<Vec<u8>>,
-}
-
-struct Probe {
-    sock: Conn,
-    until: u64,
-    ip: Ipv4Addr,
-    request: api::AddUnitRequest,
-    found: BTreeMap<u64, Discovered>,
-}
-
-impl Pending {
-    fn unit(&self, id: u64) -> bool {
-        match self {
-            Pending::State { unit, .. } | Pending::Caps { unit, .. } | Pending::Control { unit, .. } => *unit == id,
-            Pending::Batch { parts } => parts.iter().any(|(u, _, _)| *u == id),
-            Pending::Probe(_) => false,
-            Pending::Apply(a) => a.current.0 == id || a.rest.contains(&id),
-            Pending::Stream => false,
-        }
-    }
 }
 
 enum Phase {
@@ -290,11 +265,6 @@ impl Core {
             let order: Vec<u64> = self.units.iter().map(|u| u.id).collect();
             self.stream_walk(order, p, now);
         }
-        for i in 0..self.clients.len() {
-            if matches!(self.clients[i].phase, Phase::Waiting(Pending::Probe(_))) {
-                self.probe(i, p, now);
-            }
-        }
         self.write_clients(p, now);
         let busy = self.units.iter().any(Unit::busy) || !self.clients.is_empty();
         let next = self.units.iter().filter_map(Unit::deadline).chain([self.runner.next, self.scheduler.next]).min();
@@ -407,10 +377,6 @@ impl Core {
             let id: u64 = api::unit_segment(&r.path).parse().ok()?;
             units.iter().position(|u| u.id == id)
         };
-        let now_mono = p.now_ms();
-        if let Some(answer) = self.config_route(route, r, p, now_mono) {
-            return answer;
-        }
         if let Some(response) = self.timer_route(route, r, p) {
             return Ok(response);
         }
@@ -480,172 +446,6 @@ impl Core {
             // Answered by auth_route above.
             _ => Ok(Response::detail(404, "Not Found")),
         }
-    }
-
-    fn save_config(&self, p: &mut impl Platform) -> Result<(), Response> {
-        p.write_file("config.json", &crate::store::to_json(&self.config), false)
-            .map_err(|e| Response::detail(500, &alloc::format!("cannot write the config: {e}")))
-    }
-
-    /// The configuration and the unit list: `None` for any other route.
-    fn config_route(&mut self, route: Route, r: &http::Request, p: &mut impl Platform, now: u64) -> Option<Result<Response, Pending>> {
-        let segment = api::unit_segment(&r.path);
-        Some(Ok(match route {
-            Route::Config => {
-                let view = api::ConfigView { units: self.config.units.iter().map(api::ConfigUnit::from).collect() };
-                Response::json(200, &view)
-            }
-            Route::Rename => {
-                let request: api::RenameRequest = match serde_json::from_slice(&r.body) {
-                    Ok(v) => v,
-                    Err(e) => return Some(Ok(Response::detail(422, &alloc::format!("invalid rename request: {e}")))),
-                };
-                let name = request.name.trim().to_string();
-                let chars = name.chars().count();
-                if chars == 0 {
-                    return Some(Ok(Response::detail(422, "name must not be empty")));
-                }
-                if chars > api::NAME_MAX_CHARS {
-                    let m = alloc::format!("name must be at most {} characters, got {chars}", api::NAME_MAX_CHARS);
-                    return Some(Ok(Response::detail(422, &m)));
-                }
-                let Some(unit) = self.config.find_unit_mut(segment) else {
-                    return Some(Ok(Response::detail(404, &alloc::format!("Unknown unit '{segment}'"))));
-                };
-                let previous = core::mem::replace(&mut unit.name, name.clone());
-                if let Err(e) = self.save_config(p) {
-                    if let Some(unit) = self.config.find_unit_mut(segment) {
-                        unit.name = previous;
-                    }
-                    return Some(Ok(e));
-                }
-                if let Some(u) = self.units.iter_mut().find(|u| u.id.to_string() == segment) {
-                    u.name = name;
-                }
-                Response::json(200, &api::ConfigUnit::from(self.config.find_unit(segment).expect("just renamed")))
-            }
-            Route::DeleteUnit => {
-                if self.config.find_unit(segment).is_none() {
-                    return Some(Ok(Response::detail(404, &alloc::format!("Unknown unit '{segment}'"))));
-                }
-                let previous = self.config.units.clone();
-                self.config.remove_unit(segment);
-                if let Err(e) = self.save_config(p) {
-                    self.config.units = previous;
-                    return Some(Ok(e));
-                }
-                if let Some(i) = self.units.iter().position(|u| u.id.to_string() == segment) {
-                    let id = self.units[i].id;
-                    self.units.remove(i).shutdown(p);
-                    self.abandon(id);
-                }
-                Response { status: 204, body: Vec::new(), extra: Vec::new() }
-            }
-            Route::AddUnit => {
-                let request: api::AddUnitRequest = match serde_json::from_slice(&r.body) {
-                    Ok(v) => v,
-                    Err(e) => return Some(Ok(Response::detail(422, &alloc::format!("invalid add request: {e}")))),
-                };
-                let Ok(ip) = request.ip.trim().parse::<Ipv4Addr>() else {
-                    return Some(Ok(Response::detail(422, &alloc::format!("'{}' is not an IPv4 address", request.ip))));
-                };
-                if request.name.as_ref().is_some_and(|n| n.chars().count() > api::NAME_MAX_CHARS) {
-                    let m = alloc::format!("name must be at most {} characters", api::NAME_MAX_CHARS);
-                    return Some(Ok(Response::detail(422, &m)));
-                }
-                let hex = |v: &str, n: usize| v.len() == n && v.bytes().all(|b| b.is_ascii_hexdigit());
-                if request.token.as_deref().is_some_and(|t| !hex(t, 128)) {
-                    return Some(Ok(Response::detail(422, "token must be 128 hex characters")));
-                }
-                if request.key.as_deref().is_some_and(|k| !hex(k, 64)) {
-                    return Some(Ok(Response::detail(422, "key must be 64 hex characters")));
-                }
-                if request.token.is_some() != request.key.is_some() {
-                    return Some(Ok(Response::detail(422, "token and key must be given together")));
-                }
-                // Breeze Core probes only private addresses.
-                if !ip.is_private() {
-                    return Some(Ok(Response::detail(503, "discovery failed: refusing to scan a non-private subnet")));
-                }
-                let sock = match p.udp_open() {
-                    Ok(s) => s,
-                    Err(e) => return Some(Ok(Response::detail(503, &alloc::format!("discovery failed: {}", e.message)))),
-                };
-                for port in discover::PORTS {
-                    let _ = p.udp_send(sock, IpAddr::V4(ip), port, &discover::HELLO);
-                }
-                let probe = Probe { sock, until: now + PROBE_LISTEN_MS, ip, request, found: BTreeMap::new() };
-                return Some(Err(Pending::Probe(Box::new(probe))));
-            }
-            _ => return None,
-        }))
-    }
-
-    /// Collect hello replies; when the time is up, add what answered.
-    fn probe(&mut self, i: usize, p: &mut impl Platform, now: u64) {
-        let Phase::Waiting(Pending::Probe(probe)) = &mut self.clients[i].phase else { return };
-        let mut buf = [0u8; 512];
-        while let Ok((n, from)) = p.udp_recv(probe.sock, &mut buf) {
-            if let IpAddr::V4(src) = from {
-                if let Ok(d) = discover::parse(src, &buf[..n]) {
-                    probe.found.entry(d.id).or_insert(d);
-                }
-            }
-        }
-        if now < probe.until {
-            return;
-        }
-        let Phase::Waiting(Pending::Probe(probe)) = core::mem::replace(&mut self.clients[i].phase, Phase::Reading) else {
-            return;
-        };
-        let Probe { sock, ip, mut request, found, .. } = *probe;
-        p.close(sock);
-        let response = self.add_found(ip, &mut request, found.into_values().next(), p);
-        self.answer(i, response);
-    }
-
-    fn add_found(&mut self, ip: Ipv4Addr, request: &mut api::AddUnitRequest, found: Option<Discovered>, p: &mut impl Platform) -> Response {
-        let Some(found) = found else {
-            return Response::detail(404, &alloc::format!("no Midea unit answered at {ip}"));
-        };
-        let Ok(id) = i64::try_from(found.id) else {
-            return Response::detail(503, "that unit reported an unusable id");
-        };
-        // No cloud here: credentials come with the request or not at all.
-        if request.token.is_none() && request.midea_account.is_some() && request.midea_password.is_some() {
-            return Response::detail(501, "this build has no cloud support; add the unit with a token and key instead");
-        }
-        let name = request
-            .name
-            .take()
-            .map(|n| n.trim().to_string())
-            .filter(|n| !n.is_empty())
-            .or_else(|| self.config.find_unit(&id.to_string()).map(|u| u.name.clone()))
-            .unwrap_or_else(|| alloc::format!("AC {}", found.ip));
-        let previous = self.config.units.clone();
-        self.config.add_or_update_unit(UnitConfig {
-            name,
-            ip: found.ip.to_string(),
-            port: found.port,
-            id,
-            token: request.token.take(),
-            key: request.key.take(),
-        });
-        if let Err(e) = self.save_config(p) {
-            self.config.units = previous;
-            return e;
-        }
-        let stored = self.config.find_unit(&id.to_string()).expect("just added").clone();
-        let unit = unit_from(&stored, self.settings.timing);
-        match self.units.iter().position(|u| u.id == unit.id) {
-            Some(i) => {
-                let old = core::mem::replace(&mut self.units[i], unit);
-                old.shutdown(p);
-                self.abandon(stored.id as u64);
-            }
-            None => self.units.push(unit),
-        }
-        Response::json(201, &api::ConfigUnit::from(&stored))
     }
 
     fn save_timers(&self, p: &mut impl Platform) -> Result<(), String> {
@@ -1139,21 +939,6 @@ impl Core {
                 JobKind::Curve { name, .. } => p.log(&alloc::format!("curve '{name}' -> unit {unit} failed: {NOT_A_UNIT}")),
                 JobKind::Timer | JobKind::StreamRead => {}
             },
-        }
-    }
-
-    /// Answer everyone still waiting on a unit that has just been removed or
-    /// replaced: its work will not finish.
-    fn abandon(&mut self, id: u64) {
-        // A timer's work on it will not be answered either: a failure.
-        let lost = self.jobs.iter().filter(|j| j.unit == id && matches!(j.kind, JobKind::Timer)).count();
-        self.jobs.retain(|j| j.unit != id);
-        self.runner.errors += lost as u64;
-        for c in self.clients.iter_mut() {
-            if matches!(&c.phase, Phase::Waiting(pending) if pending.unit(id)) {
-                let r = Response::detail(503, "the unit was removed or replaced while this request waited");
-                c.phase = Phase::writing(r);
-            }
         }
     }
 

@@ -449,7 +449,6 @@ fn ucore_answers_as_breeze_core_does() {
         ("GET", "/api/nope".into(), AUTH.to_vec(), ""),
         ("GET", "/api/units/999/state".into(), AUTH.to_vec(), ""),
         ("GET", "/api/units/abc/state".into(), AUTH.to_vec(), ""),
-        ("GET", format!("/api/units/{alpha}"), AUTH.to_vec(), ""),
         ("GET", format!("/api/units/{alpha}/control"), AUTH.to_vec(), ""),
         ("POST", format!("/api/units/{alpha}/control"), AUTH.to_vec(), "nope"),
         ("POST", format!("/api/units/{alpha}/control"), AUTH.to_vec(), ""),
@@ -893,42 +892,35 @@ fn ucore_answers_as_breeze_core_does() {
     drop((rs, us, second));
 
     // ------------------------------------------------------- the configuration
-    // Everything short of probing an address (which needs units on a private
-    // network: the Linux run does that). Last, since it changes the units.
-    let long = "x".repeat(65);
-    let adds: Vec<String> = vec![
-        "nope".into(),
-        r#"{"name": "no address"}"#.into(),
-        r#"{"ip": "not-an-ip"}"#.into(),
-        r#"{"ip": " 10.0.0.1 ", "token": "zz", "key": "zz"}"#.into(),
-        format!(r#"{{"ip": "10.0.0.1", "key": "{}"}}"#, "ab".repeat(32)),
-        format!(r#"{{"ip": "10.0.0.1", "token": "{}"}}"#, "ab".repeat(64)),
-        format!(r#"{{"ip": "10.0.0.1", "name": "{long}"}}"#),
-        r#"{"ip": "127.93.1.2"}"#.into(),
-        r#"{"ip": "8.8.8.8", "midea_account": "a", "midea_password": "b"}"#.into(),
+    // μCore's unit list is the deployer's (DESIGN.md): it adds, renames and
+    // deletes nothing, and advertises neither config_api nor delete_unit, so
+    // clients hide those. Breeze Core still does all three; here μCore alone
+    // is held to refusing them plainly and leaving config.json as it was.
+    let config_before = std::fs::read(ucore_dir.join("config.json")).unwrap();
+    let refused = [
+        ("POST", "/api/units".to_string(), r#"{"ip": "127.93.1.2"}"#, 405, Some("GET")),
+        ("GET", "/api/config".into(), "", 404, None),
+        ("PATCH", "/api/units/111111111111".into(), r#"{"name": "Spare room"}"#, 404, None),
+        ("DELETE", "/api/units/222222222222".into(), "", 404, None),
+        ("DELETE", format!("/api/units/{}", alpha.trim_matches('"')), "", 404, None),
+        ("GET", format!("/api/units/{}", alpha.trim_matches('"')), "", 404, None),
     ];
-    for body in &adds {
-        compare_exact(&mut failures, real, ucore, "POST", "/api/units", &AUTH, body);
+    for (method, path, body, status, allow) in refused {
+        let a = call(ucore, method, &path, &AUTH, body);
+        let allowed = a.headers.iter().find(|(n, _)| n.eq_ignore_ascii_case("allow")).map(|(_, v)| v.as_str());
+        if a.status != status || allowed != allow {
+            failures.push(format!("{method} {path}: {} (Allow {allowed:?}), wanted {status} (Allow {allow:?})", a.status));
+        }
     }
-    compare_exact(&mut failures, real, ucore, "GET", "/api/config", &AUTH, "");
-    for (method, path, body) in [
-        ("PATCH", "/api/units/111111111111".to_string(), "nope".to_string()),
-        ("PATCH", "/api/units/111111111111".into(), r#"{"name": "   "}"#.into()),
-        ("PATCH", "/api/units/111111111111".into(), format!(r#"{{"name": "{long}"}}"#)),
-        ("PATCH", "/api/units/999".into(), r#"{"name": "Nobody"}"#.into()),
-        ("PATCH", "/api/units/0111111111111".into(), r#"{"name": "Leading zero"}"#.into()),
-        ("PATCH", "/api/units/111111111111".into(), r#"{"name": "  Spare room  "}"#.into()),
-        ("DELETE", "/api/units/999".into(), String::new()),
-        ("DELETE", "/api/units/222222222222".into(), String::new()),
-        ("GET", "/api/config".into(), String::new()),
-        ("GET", "/api/units".into(), String::new()),
-    ] {
-        compare_exact(&mut failures, real, ucore, method, &path, &AUTH, &body);
+    let version = call(ucore, "GET", "/api/version", &[("X-API-Key", KEY)], "").json();
+    for gone in ["config_api", "delete_unit"] {
+        if version["features"].as_array().is_some_and(|f| f.iter().any(|x| x == gone)) {
+            failures.push(format!("/api/version still advertises {gone}"));
+        }
     }
-    // And the file both rewrote from the same start: byte for byte.
-    let (rc, uc) = (std::fs::read(real_dir.join("config.json")).unwrap(), std::fs::read(ucore_dir.join("config.json")).unwrap());
-    if rc != uc {
-        failures.push(format!("config.json\n   real  {}\n   ucore {}", String::from_utf8_lossy(&rc), String::from_utf8_lossy(&uc)));
+    compare_exact(&mut failures, real, ucore, "GET", "/api/units", &AUTH, "");
+    if std::fs::read(ucore_dir.join("config.json")).unwrap() != config_before {
+        failures.push("μCore rewrote config.json".into());
     }
 
     // ------------------------------------------------------------- firing

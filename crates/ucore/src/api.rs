@@ -12,9 +12,7 @@ use serde::{Deserialize, Serialize};
 pub const FEATURES: &[&str] = &[
     "batch_state",
     "beep_control",
-    "config_api",
     "control_feedback",
-    "delete_unit",
     "device_pairing",
     "ed25519_auth",
     "live_stream",
@@ -56,10 +54,6 @@ pub enum Route {
     RevokeDevice,
     Whoami,
     Upgrade,
-    Config,
-    AddUnit,
-    Rename,
-    DeleteUnit,
     Timers,
     TimerCreate,
     TimerStatus,
@@ -94,8 +88,6 @@ pub fn resolve(method: &str, path: &str) -> Resolved {
         ("GET", "/api/version", ApiKey, Some(Route::Version)),
         ("GET", "/api/units", Full, Some(Route::Units)),
         ("GET", "/api/units/state", Full, Some(Route::AllStates)),
-        ("GET", "/api/config", Full, Some(Route::Config)),
-        ("POST", "/api/units", Full, Some(Route::AddUnit)),
         ("POST", "/api/auth/enroll/start", ApiKey, Some(Route::EnrollStart)),
         ("POST", "/api/auth/enroll/poll", ApiKey, Some(Route::EnrollPoll)),
         ("POST", "/api/auth/enroll/approve", AdminLan, Some(Route::EnrollApprove)),
@@ -157,14 +149,9 @@ pub fn resolve(method: &str, path: &str) -> Resolved {
         return if method == "DELETE" { Resolved::Route(AdminLan, Route::RevokeDevice) } else { Resolved::MethodNotAllowed("DELETE") };
     }
     let Some(rest) = path.strip_prefix("/api/units/") else { return Resolved::NotFound };
-    let Some((_, tail)) = rest.split_once('/') else {
-        return match (rest.is_empty(), method) {
-            (true, _) => Resolved::NotFound,
-            (false, "PATCH") => Resolved::Route(Guard::Full, Route::Rename),
-            (false, "DELETE") => Resolved::Route(Guard::Full, Route::DeleteUnit),
-            (false, _) => Resolved::MethodNotAllowed("PATCH"),
-        };
-    };
+    // The unit list is the deployer's: no rename or delete here (see
+    // DESIGN.md), so a unit's own path is no route at all.
+    let Some((_, tail)) = rest.split_once('/') else { return Resolved::NotFound };
     match (tail, method) {
         ("state", "GET") => Resolved::Route(Guard::Full, Route::UnitState),
         ("state", _) => Resolved::MethodNotAllowed("GET"),
@@ -313,59 +300,6 @@ pub struct Envelope<'a> {
     pub errors: Vec<UnitView<'a>>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct RenameRequest {
-    pub name: String,
-}
-
-/// Breeze Core's, Midea account fields included: μCore has no cloud, and says
-/// so the way a Breeze Core built without one does.
-#[derive(Debug, Deserialize)]
-pub struct AddUnitRequest {
-    pub ip: String,
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub token: Option<String>,
-    #[serde(default)]
-    pub key: Option<String>,
-    #[serde(default)]
-    pub midea_account: Option<String>,
-    #[serde(default)]
-    pub midea_password: Option<String>,
-    #[serde(default)]
-    pub midea_region: Option<String>,
-}
-
-/// A configured unit as a client sees it: never its token or key, only
-/// whether it has them.
-#[derive(Serialize)]
-pub struct ConfigUnit<'a> {
-    pub id: String,
-    pub name: &'a str,
-    pub ip: &'a str,
-    pub port: u16,
-    pub has_v3_credentials: bool,
-}
-
-impl<'a> From<&'a crate::store::UnitConfig> for ConfigUnit<'a> {
-    fn from(u: &'a crate::store::UnitConfig) -> Self {
-        Self {
-            id: u.id.to_string(),
-            name: &u.name,
-            ip: &u.ip,
-            port: u.port,
-            has_v3_credentials: u.token.is_some() && u.key.is_some(),
-        }
-    }
-}
-
-#[derive(Serialize)]
-pub struct ConfigView<'a> {
-    pub units: Vec<ConfigUnit<'a>>,
-}
-
-pub const NAME_MAX_CHARS: usize = 64;
 
 fn one() -> u8 {
     1
@@ -560,7 +494,12 @@ mod tests {
     fn routing_matches_breeze_cores_for_what_is_kept() {
         assert_eq!(resolve("GET", "/api/health"), Resolved::Route(Guard::Open, Route::Health));
         assert_eq!(resolve("PUT", "/api/units"), Resolved::MethodNotAllowed("GET"));
-        assert_eq!(resolve("GET", "/api/units/123"), Resolved::MethodNotAllowed("PATCH"));
+        // The unit list is read-only: no rename, no delete, no add.
+        assert_eq!(resolve("GET", "/api/units/123"), Resolved::NotFound);
+        assert_eq!(resolve("PATCH", "/api/units/123"), Resolved::NotFound);
+        assert_eq!(resolve("DELETE", "/api/units/123"), Resolved::NotFound);
+        assert_eq!(resolve("POST", "/api/units"), Resolved::MethodNotAllowed("GET"));
+        assert_eq!(resolve("GET", "/api/config"), Resolved::NotFound);
         assert_eq!(resolve("GET", "/api/units/123/control"), Resolved::MethodNotAllowed("POST"));
         assert_eq!(resolve("GET", "/api/units/123/history"), Resolved::NotFound);
         assert_eq!(resolve("GET", "/api/system"), Resolved::NotFound);
