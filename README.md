@@ -46,11 +46,12 @@ Espressif's QEMU (`diag`: 67 checks with eight emulated units), keeps its files
 in flash safe from power cuts, and sets its clock and zone itself: 447 KB of
 application on the S3, 817 KB with Wi-Fi. A real board is next.
 
-μCore will not come as a ready binary: a **deployer** (a page in the browser
-and a helper on your computer) will build it for your board, fetch your units'
-tokens with [breeze-token](https://github.com/monikapurpl3/breeze-token), and
-flash it. So μCore itself no longer adds, renames or removes units: the unit
-list is the deployer's.
+μCore does not come as a ready binary: the **[deployer](deploy/)** (a page in
+the browser and a helper on your computer) builds it for your board, fetches
+your units' tokens with [breeze-token](https://github.com/monikapurpl3/breeze-token),
+and puts it on the board. So μCore itself no longer adds, renames or removes
+units: the unit list is the deployer's. For now it builds for the emulated
+boards only.
 [DESIGN.md](DESIGN.md) has the plan, the milestones and the reasoning.
 
 ## Versions

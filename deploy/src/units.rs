@@ -153,7 +153,7 @@ pub fn fetch(req: FetchRequest, config: &mut AppConfig, log: &net::Log, say: &Sa
     };
 
     // --- signing in: the password's one use
-    log.note("midea", cloud_host(cloud), "signed in with your account, to fetch the units' tokens");
+    log.note("midea", cloud_host(cloud), "sent your account and password to sign in, to fetch the units' tokens");
     let session = {
         let credentials = Credentials::new(account.as_str(), req.password, "");
         match clouds.login(cloud, &credentials) {

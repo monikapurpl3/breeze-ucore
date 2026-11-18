@@ -35,7 +35,13 @@
 
 <section id="no-helper" class="card warn" hidden aria-labelledby="no-helper-title">
   <h2 id="no-helper-title">The helper is not running</h2>
-  <p>This page only shows what the helper on your computer does. Start the helper, and it opens this page with the link it needs. If you opened this page yourself, open the link the helper printed instead.</p>
+  <p>This page only shows what the deployer's helper on your computer does, and the helper opens it for you with the link it needs. To start the helper:</p>
+  <ul>
+    <li>Linux or macOS, in a terminal: <code>curl -fsSL https://aspic.salataputarica.hr.eu.org/ucore-deploy/run.sh | sh</code></li>
+    <li>Windows, in PowerShell: <code>irm https://aspic.salataputarica.hr.eu.org/ucore-deploy/run.ps1 | iex</code></li>
+    <li>From a checkout of μCore: <code>cargo run --release</code> in its <code>deploy</code> folder.</li>
+  </ul>
+  <p>Each checks the helper against its SHA-256 before running it. If the helper is already running, open the link it printed.</p>
 </section>
 
 <section id="list" class="card" hidden aria-labelledby="list-title">
