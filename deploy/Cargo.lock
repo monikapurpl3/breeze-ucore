@@ -1119,6 +1119,7 @@ name = "ucore-deploy"
 version = "0.1.0"
 dependencies = [
  "breeze-token",
+ "cc",
  "ctrlc",
  "flate2",
  "getrandom",

@@ -25,6 +25,8 @@ flate2 = "1"
 tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 ctrlc = "3"
+# Finding Microsoft's linker on Windows, as Rust itself does.
+cc = "1"
 
 [features]
 # breeze-token's pretend Midea cloud, for testing without a real account.

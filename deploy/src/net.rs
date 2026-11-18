@@ -3,7 +3,8 @@
 //! computer except..." is something to check, not to take on trust.
 //!
 //! There are three kinds of destination, and no others:
-//! - downloads: μCore's source, and the build tools (a fixed list of hosts);
+//! - downloads: μCore's source, and the build tools (a fixed list of hosts),
+//!   plus the Rust libraries cargo fetches from crates.io while building;
 //! - Midea's cloud, with the user's own account, to fetch the units' tokens;
 //! - this network: looking for air conditioners, and trying a token on one.
 

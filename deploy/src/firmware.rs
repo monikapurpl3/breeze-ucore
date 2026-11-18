@@ -53,13 +53,20 @@ fn platform() -> Result<&'static str, String> {
     }
 }
 
-/// The host the Rust toolchains are for. On Windows the GNU one, which
-/// carries its own linker: no Visual Studio needed.
+/// The host the ordinary Rust toolchains are for. On Windows the GNU one,
+/// which carries its own linker: no Visual Studio needed.
 fn rust_host() -> Result<&'static str, String> {
     Ok(match platform()? {
         "x86_64-pc-windows-msvc" => "x86_64-pc-windows-gnu",
         other => other,
     })
+}
+
+/// Espressif publishes its Xtensa Rust for the MSVC host only on Windows, so
+/// building for an ESP32-S3 there needs Microsoft's linker; found the way
+/// Rust's own `cc` crate finds it.
+fn msvc_linker_found() -> bool {
+    !cfg!(windows) || cc::windows_registry::find_tool("x86_64-pc-windows-msvc", "link.exe").is_some()
 }
 
 fn pinned(table: &[(&str, &'static str)], key: &str) -> Option<&'static str> {
@@ -165,6 +172,13 @@ impl Tools {
             return Ok(());
         }
         let plat = platform()?;
+        if !msvc_linker_found() {
+            return Err("Building for an ESP32-S3 on Windows needs Microsoft's C++ build tools: Espressif makes its \
+                        Xtensa Rust for that host only. Install \"Build Tools for Visual Studio\" with \"Desktop \
+                        development with C++\" (free, from Microsoft), then build again. An ESP32-C6 board needs \
+                        none of it."
+                .into());
+        }
         let espup = self.bin().join(format!("espup{EXE}"));
         if !espup.exists() {
             let url = format!("https://github.com/esp-rs/espup/releases/download/{ESPUP_VERSION}/espup-{plat}{EXE}");
@@ -177,7 +191,7 @@ impl Tools {
         let saved = user_environment();
         let export = self.root.join("export-esp.sh");
         let outcome = run(
-            self.command(&espup).args(["install", "-t", "esp32s3", "-v", ESP_TOOLCHAIN, "-d", rust_host()?, "-f"]).arg(&export),
+            self.command(&espup).args(["install", "-t", "esp32s3", "-v", ESP_TOOLCHAIN, "-d", plat, "-f"]).arg(&export),
             say,
         );
         restore_user_environment(saved, say);
@@ -201,12 +215,15 @@ impl Tools {
     }
 
     /// Build μCore for a board; the ELF's path.
-    pub fn build(&self, src: &Path, build_dir: &Path, board: &Board, seed: Option<&Path>, say: &Say) -> Result<PathBuf, String> {
+    pub fn build(&self, src: &Path, build_dir: &Path, board: &Board, seed: Option<&Path>, log: &net::Log, say: &Say) -> Result<PathBuf, String> {
         let chip = boards::chip(&board.chip).ok_or("no such chip")?;
         let toolchain = if chip.toolchain == "esp" { "esp".to_string() } else { NIGHTLY.to_string() };
         let port = src.join("ports").join("esp32");
         let features = format!("{},{}", board.chip, board.network);
         say.line(format!("Building μCore for {} ({features})...", board.name));
+        // Cargo fetches the Rust libraries μCore is made of (esp-hal, smoltcp,
+        // serde and the rest) from crates.io, the first time.
+        log.note("download", "index.crates.io, static.crates.io", "cargo fetching the Rust libraries μCore is built from (crates.io)");
         let mut c = self.command(self.cargo());
         c.current_dir(&port)
             .env("RUSTUP_TOOLCHAIN", &toolchain)

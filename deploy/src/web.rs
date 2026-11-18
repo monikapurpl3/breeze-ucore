@@ -351,7 +351,7 @@ fn build(app: &App, d: &store::Deployment, say: &crate::jobs::Say) -> Result<Val
     let src = app.source(say)?;
     app.tools.ensure(&d.board.chip, &app.log, say)?;
     let seed = seed_for(app, d)?;
-    let elf = app.tools.build(&src, &app.data.join("build"), &d.board, seed.as_deref(), say)?;
+    let elf = app.tools.build(&src, &app.data.join("build"), &d.board, seed.as_deref(), &app.log, say)?;
     let dir = app.store.dir(&d.id)?;
     let image = dir.join("flash.bin");
     // Rebuilding keeps what μCore stored: paired phones, programs, timers.

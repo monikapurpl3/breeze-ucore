@@ -225,7 +225,8 @@ It is also made checkable rather than promised:
   nothing from anywhere but where it came from: no fonts, scripts or
   analytics from elsewhere.
 - The helper itself only ever contacts: the source and toolchain downloads
-  (GitHub, static.rust-lang.org, Espressif's releases), and **Midea's cloud,
+  (GitHub, static.rust-lang.org, Espressif's releases, and crates.io for the
+  Rust libraries cargo builds μCore from), and **Midea's cloud,
   with the user's own account, to fetch the units' tokens** — the one thing
   that cannot be done locally, and the page says so where it asks for the
   password. Nothing the user types goes anywhere else. The page shows every

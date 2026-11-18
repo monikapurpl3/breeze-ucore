@@ -191,7 +191,9 @@ function unitRow(u) {
   const tr = el('tr');
   const name = el('input');
   name.value = u.name;
-  name.setAttribute('aria-label', 'Name of the unit at ' + u.ip);
+  // Its address and port, so each field has a name of its own: several
+  // units can share an address (an emulated household does).
+  name.setAttribute('aria-label', 'Name of the unit at ' + u.ip + ':' + u.port + ' (id ' + u.id + ')');
   name.maxLength = 64;
   name.addEventListener('change', async () => {
     try {
