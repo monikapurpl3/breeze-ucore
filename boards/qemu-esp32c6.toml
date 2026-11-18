@@ -1,0 +1,12 @@
+# An ESP32-C6 in Espressif's QEMU (qemu-system-riscv32 -machine esp32c6).
+# QEMU cannot read back this machine's flash correctly, so μCore keeps its
+# store in RAM there: what it stores (paired phones, programs, timers) is
+# gone when QEMU stops. The S3 machine keeps it.
+name = "ESP32-C6 in QEMU (forgets what it stores)"
+chip = "esp32c6"
+network = "qemu"
+flash_size = "4mb"
+
+[qemu]
+program = "qemu-system-riscv32"
+machine = "esp32c6"

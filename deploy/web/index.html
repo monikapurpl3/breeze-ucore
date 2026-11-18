@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>μCore deployer</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <h1>Breeze μCore deployer</h1>
+  <p id="helper" class="pill" role="status" aria-live="polite">Looking for the helper…</p>
+</header>
+
+<main>
+<section id="local" class="card local" aria-labelledby="local-title">
+  <h2 id="local-title">Everything stays on this computer</h2>
+  <ul>
+    <li>Your deployments (the air conditioners, their tokens, your Wi-Fi password, the API key) are kept by the helper on this computer, in <code id="data-dir">its own folder</code>, and nowhere else.</li>
+    <li>This page can talk to the helper on this computer (<code>127.0.0.1</code>) and to nothing else. Its security policy forbids any other connection, and your browser enforces that.</li>
+    <li>The helper goes on the internet for two things only: to download μCore's source and the tools that build it (GitHub, static.rust-lang.org), and, only when you fetch tokens, to <strong>Midea's cloud, with your own Midea account</strong>. That is the one thing that cannot be done on this computer: only Midea hands out the air conditioners' tokens.</li>
+    <li>Everything the helper connects to is listed here as it happens.</li>
+  </ul>
+  <details id="connections-box">
+    <summary>What the helper has connected to (<span id="connections-count">0</span>)</summary>
+    <table class="connections">
+      <thead><tr><th scope="col">When</th><th scope="col">Where</th><th scope="col">Why</th></tr></thead>
+      <tbody id="connections"></tbody>
+    </table>
+  </details>
+</section>
+
+<section id="no-helper" class="card warn" hidden aria-labelledby="no-helper-title">
+  <h2 id="no-helper-title">The helper is not running</h2>
+  <p>This page only shows what the helper on your computer does. Start the helper, and it opens this page with the link it needs. If you opened this page yourself, open the link the helper printed instead.</p>
+</section>
+
+<section id="list" class="card" hidden aria-labelledby="list-title">
+  <h2 id="list-title">Deployments</h2>
+  <ul id="deployments" class="items"></ul>
+  <form id="new" class="row">
+    <label>Name <input id="new-name" required maxlength="60" placeholder="Home"></label>
+    <label>Board <select id="new-board"></select></label>
+    <button type="submit">New deployment</button>
+  </form>
+  <p id="new-error" class="error" role="alert"></p>
+</section>
+
+<section id="deployment" hidden aria-labelledby="d-title">
+  <p><button id="back" class="link" type="button">← All deployments</button></p>
+  <h2 id="d-title"></h2>
+
+  <section class="card" aria-labelledby="board-title">
+    <h3 id="board-title">1. The board</h3>
+    <form id="board" class="grid">
+      <label>Board <select id="board-pick"></select></label>
+      <fieldset id="custom" hidden>
+        <legend>Your own board</legend>
+        <label>Name <input id="c-name" maxlength="60"></label>
+        <label>Chip <select id="c-chip"><option value="esp32s3">ESP32-S3</option><option value="esp32c6">ESP32-C6</option></select></label>
+        <label>Network <select id="c-network"><option value="wifi">Wi-Fi</option><option value="qemu">Espressif's QEMU</option></select></label>
+        <label>Flash <select id="c-flash"><option>4mb</option><option>8mb</option><option>16mb</option></select></label>
+        <label>QEMU program <input id="c-qprogram" placeholder="qemu-system-xtensa"></label>
+        <label>QEMU machine <input id="c-qmachine" placeholder="esp32s3"></label>
+      </fieldset>
+      <p class="hint" id="board-hint"></p>
+      <button type="submit">Save the board</button>
+      <p class="error" role="alert" id="board-error"></p>
+    </form>
+  </section>
+
+  <section class="card" aria-labelledby="units-title">
+    <h3 id="units-title">2. The air conditioners</h3>
+    <table class="units">
+      <thead><tr><th scope="col">Name</th><th scope="col">Address</th><th scope="col">Id</th><th scope="col">Token</th><th scope="col"><span class="sr">Actions</span></th></tr></thead>
+      <tbody id="units"></tbody>
+    </table>
+    <p id="no-units" class="hint">None yet. Bring them in from a Breeze Core you already have, or fetch their tokens from Midea.</p>
+
+    <details class="sub">
+      <summary>From a Breeze Core you already have</summary>
+      <p>Pick that server's <code>config.json</code>. It is read here, in your browser, and handed to the helper on this computer; it goes nowhere else.</p>
+      <label>config.json <input id="import-file" type="file" accept=".json,application/json"></label>
+      <p id="import-result" role="status" aria-live="polite"></p>
+    </details>
+
+    <details class="sub">
+      <summary>From Midea's cloud (with breeze-token)</summary>
+      <form id="fetch" class="grid">
+        <p class="notice"><strong>This is the one step that uses the internet with your details.</strong> The helper finds the air conditioners on your network, asks Midea's clouds which one has your account (by name only, no password), then signs in to that one with your password, once, to fetch each unit's token. It checks every token on its unit before keeping it. The password is not stored and not logged.</p>
+        <label>The app your units are in <select id="f-app">
+          <option value="">Not sure</option><option value="smarthome">MSmartHome</option><option value="meiju">美的美居 (Meiju)</option><option value="nethome">NetHome Plus</option></select></label>
+        <label>Email or phone you sign in with <input id="f-account" autocomplete="username" required></label>
+        <label>Password <input id="f-password" type="password" autocomplete="current-password" required></label>
+        <label>Where to look <select id="f-look">
+          <option value="around">This computer's network</option><option value="subnet">A subnet</option><option value="addresses">These addresses</option></select></label>
+        <label id="f-at-label" hidden>Subnet or addresses <input id="f-at" placeholder="192.168.1.0/24 or 192.168.1.50 192.168.1.51"></label>
+        <label class="check"><input id="f-again" type="checkbox"> Fetch again for units that have a token</label>
+        <button type="submit">Fetch the tokens</button>
+      </form>
+      <pre id="fetch-log" class="log" aria-live="polite" hidden></pre>
+    </details>
+  </section>
+
+  <section class="card" aria-labelledby="env-title">
+    <h3 id="env-title">3. Where it lives</h3>
+    <form id="env" class="grid">
+      <div id="wifi-fields">
+        <label>Wi-Fi network <input id="e-ssid" autocomplete="off"></label>
+        <label>Wi-Fi password <input id="e-pass" type="password" autocomplete="new-password" placeholder=""></label>
+      </div>
+      <p id="wifi-qemu" class="hint" hidden>A QEMU board has no Wi-Fi: it reaches your network through this computer.</p>
+      <label>Time zone <select id="e-zone"></select></label>
+      <label>Time server <input id="e-ntp" required></label>
+      <label>Its name on the network <input id="e-host" required maxlength="32"></label>
+      <button type="submit">Save</button>
+      <p class="error" role="alert" id="env-error"></p>
+    </form>
+  </section>
+
+  <section class="card" aria-labelledby="build-title">
+    <h3 id="build-title">4. Build it, and run it</h3>
+    <p class="hint">The first build installs the tools it needs into the helper's own folder (for an ESP32-S3 about a gigabyte), which takes a while. Nothing is added to your PATH.</p>
+    <p class="row">
+      <button id="build" type="button">Build μCore</button>
+      <button id="configure" type="button">Write the configuration only</button>
+      <button id="run" type="button">Start it</button>
+      <button id="stop" type="button">Stop it</button>
+    </p>
+    <p class="hint">"Write the configuration only" puts the air conditioners and the settings above on the board without building again; what μCore stored itself (paired phones, programs, timers) stays.</p>
+    <pre id="build-log" class="log" aria-live="polite" hidden></pre>
+    <div id="running" hidden>
+      <p>μCore answers on this computer at <code id="address"></code>. <button id="show-key" type="button">Show the API key</button> <code id="api-key" hidden></code></p>
+      <h4>Its console</h4>
+      <pre id="serial" class="log console"></pre>
+    </div>
+  </section>
+
+  <section class="card danger" aria-labelledby="forget-title">
+    <h3 id="forget-title">Forget this deployment</h3>
+    <p>Deletes its folder on this computer: the air conditioners' tokens, the Wi-Fi password, the API key, and its flash image.</p>
+    <button id="forget" type="button">Forget it</button>
+  </section>
+</section>
+</main>
+</body>
+</html>

@@ -1,0 +1,37 @@
+[package]
+name = "ucore-deploy"
+description = "The Breeze μCore deployer's helper: builds μCore for one household, from a page in the browser, and keeps everything on this computer."
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+publish = false
+
+# Its own workspace: an ordinary program for this computer, with heavier
+# dependencies (TLS for downloads and for Midea's cloud) than μCore's.
+[workspace]
+
+[dependencies]
+# The bundle image and the POSIX TZ rules, from μCore itself.
+ucore = { path = "../crates/ucore" }
+# Finding the units and fetching their tokens: breeze-token's library.
+breeze-token = { git = "https://github.com/monikapurpl3/breeze-token", rev = "f052091f38493d9b3a2996f7363df77b1b744866" }
+tiny_http = "0.12"
+ureq = { version = "2", default-features = false, features = ["tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+getrandom = "0.2"
+flate2 = "1"
+tar = "0.4"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+ctrlc = "3"
+
+[features]
+# breeze-token's pretend Midea cloud, for testing without a real account.
+fake-cloud = ["breeze-token/fake-cloud"]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

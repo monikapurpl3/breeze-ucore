@@ -1,0 +1,11 @@
+# An ESP32-S3 in Espressif's QEMU (qemu-system-xtensa -machine esp32s3), on
+# its emulated OpenCores Ethernet. For trying μCore before a board arrives:
+# it runs on this computer, and reaches the air conditioners through it.
+name = "ESP32-S3 in QEMU"
+chip = "esp32s3"
+network = "qemu"
+flash_size = "4mb"
+
+[qemu]
+program = "qemu-system-xtensa"
+machine = "esp32s3"
