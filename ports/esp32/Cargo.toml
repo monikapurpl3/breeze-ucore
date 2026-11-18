@@ -17,7 +17,11 @@ test = false
 bench = false
 
 [features]
-default = ["qemu"]
+default = ["esp32s3", "qemu"]
+# The chip, exactly one. An ESP32-S3 builds with Espressif's Xtensa toolchain;
+# an ESP32-C6 is RISC-V and builds with the ordinary one (see README.md).
+esp32s3 = ["esp-hal/esp32s3", "esp-bootloader-esp-idf/esp32s3", "esp-storage/esp32s3", "esp-alloc/esp32s3", "esp-println/esp32s3", "esp-backtrace/esp32s3", "esp-radio?/esp32s3", "esp-rtos?/esp32s3"]
+esp32c6 = ["esp-hal/esp32c6", "esp-bootloader-esp-idf/esp32c6", "esp-storage/esp32c6", "esp-alloc/esp32c6", "esp-println/esp32c6", "esp-backtrace/esp32c6", "esp-radio?/esp32c6", "esp-rtos?/esp32c6"]
 # Espressif's QEMU: the OpenCores Ethernet MAC it emulates, no radio.
 qemu = []
 # A real chip on Wi-Fi.
@@ -27,15 +31,15 @@ stats = ["esp-alloc/internal-heap-stats"]
 
 [dependencies]
 ucore = { path = "../../crates/ucore" }
-esp-hal = { version = "~1.2.2", features = ["esp32s3", "unstable"] }
-esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32s3"] }
-esp-storage = { version = "0.10.0", features = ["esp32s3"] }
-esp-alloc = { version = "0.11.0", features = ["esp32s3"] }
-esp-println = { version = "0.18.0", features = ["esp32s3"] }
-esp-backtrace = { version = "0.20.0", features = ["esp32s3", "panic-handler", "println"] }
-esp-radio = { version = "1.0.0-beta.1", features = ["esp-alloc", "esp32s3", "unstable", "wifi"], optional = true }
+esp-hal = { version = "~1.2.2", features = ["unstable"] }
+esp-bootloader-esp-idf = "0.6.0"
+esp-storage = "0.10.0"
+esp-alloc = "0.11.0"
+esp-println = "0.18.0"
+esp-backtrace = { version = "0.20.0", features = ["panic-handler", "println"] }
+esp-radio = { version = "1.0.0-beta.1", features = ["esp-alloc", "unstable", "wifi"], optional = true }
 embassy-futures = { version = "0.1", optional = true }
-esp-rtos = { version = "0.4.0", features = ["esp-alloc", "esp-radio", "esp32s3"], optional = true }
+esp-rtos = { version = "0.4.0", features = ["esp-alloc", "esp-radio"], optional = true }
 # The SHA-512 Ed25519 verification needs, as a loop rather than 80 rounds
 # unrolled: 45 KB of flash otherwise (the host build keeps the fast one).
 sha2 = { version = "0.10", default-features = false, features = ["force-soft-compact"] }
