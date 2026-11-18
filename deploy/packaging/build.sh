@@ -38,6 +38,9 @@ if [ "$zig_have" != "0.16.0" ]; then
   exit 1
 fi
 export CARGO_ZIGBUILD_ZIG_PATH="$ZIG"
+# The commit each helper downloads, said outright rather than left to the
+# build script to notice.
+export UCORE_DEPLOY_REV="$rev"
 
 # label | rust target
 TARGETS="
@@ -75,5 +78,8 @@ for label in $wanted; do
 done
 
 (cd "$OUT" && sha256sum ucore-deploy-"$VERSION"-* | sed 's/ \*/  /' > SHA256SUMS)
+# Each must say so: a helper that downloads another commit's source is wrong.
+have=$("$OUT/ucore-deploy-$VERSION-windows-x86_64.exe" --version 2>/dev/null || true)
+case "$have" in *"$rev"*|"") ;; *) echo "!! the Windows helper says \"$have\", not $rev"; exit 1 ;; esac
 echo "== $OUT (μCore $rev)"
 ls -l "$OUT"
