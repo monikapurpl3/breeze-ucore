@@ -39,15 +39,18 @@ Breeze Core a step above the vendor's platform:
 
 ## Status
 
-**In development; nothing released yet.** Milestone 1 is done: the protocol,
-units, state, control and capabilities, on an ordinary computer, matching
-Breeze Core 4.3.2 under the differential test (a 338 KB build). Of milestone
-2, pairing (both auth versions), the configuration routes (adding units by
-address, renaming, removing), timers (sleep timers and scheduled starts),
-programs (favourites, schedules and temperature curves, with the scheduler
-that runs them) and the live event stream are done: every route μCore keeps,
-and Breeze Core's own `diag` passes against it as it does against Breeze Core
-(25 checks). Next, the ESP32-S3.
+**In development; nothing released yet.** Every route μCore keeps answers as
+Breeze Core 4.4.0's does under the differential test, and Breeze Core's own
+`diag` passes against it. It runs on an ESP32-S3 and an ESP32-C6 in
+Espressif's QEMU (`diag`: 67 checks with eight emulated units), keeps its files
+in flash safe from power cuts, and sets its clock and zone itself: 447 KB of
+application on the S3, 817 KB with Wi-Fi. A real board is next.
+
+μCore will not come as a ready binary: a **deployer** (a page in the browser
+and a helper on your computer) will build it for your board, fetch your units'
+tokens with [breeze-token](https://github.com/monikapurpl3/breeze-token), and
+flash it. So μCore itself no longer adds, renames or removes units: the unit
+list is the deployer's.
 [DESIGN.md](DESIGN.md) has the plan, the milestones and the reasoning.
 
 ## Versions

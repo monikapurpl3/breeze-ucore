@@ -8,6 +8,8 @@ platform — with the web panel, the command line and everything else a
 microcontroller cannot carry taken out, and the code written again to be small.
 
 For people comfortable with an API, `curl` and `breezectl`: there is no page.
+And it does not come as a ready binary: a **deployer** builds it for one
+household's board, units and network (see [Deployment](#deployment)).
 
 ## The contract
 
@@ -20,7 +22,8 @@ unchanged: they already decide what to show from that list.
 **The store files are Breeze Core's**: `config.json`, `devices.json`,
 `programs.json`, `timers.json`, the same formats, so a configuration moves
 between the two either way. Byte-identical round trips, as Breeze Core's own
-are.
+are. `config.json` is the deployer's: μCore reads it and never writes it (it
+adds, renames and deletes no units; see below).
 
 The code is not shared; the behaviour is. Everything that made Breeze Core
 correct was found by checking against something outside it (the transposed swing
@@ -64,8 +67,6 @@ Advertised features (the names `/api/version` uses):
 | `unit_capabilities` | `GET /api/units/{id}/capabilities` |
 | `control_feedback` | `not_applied` in control answers |
 | `beep_control` | `beep` in a control request |
-| `config_api` | `GET /api/config`, `POST /api/units` (by address, with V3 credentials), `PATCH /api/units/{id}` |
-| `delete_unit` | `DELETE /api/units/{id}` |
 | `device_pairing` | `/api/auth/enroll/{start,approve,poll}`, `/api/auth/devices`, `/api/auth/devices/{id}` |
 | `ed25519_auth` | signed requests (v2), `/api/auth/upgrade` |
 | `whoami` | `GET /api/auth/whoami` |
@@ -83,11 +84,11 @@ as a string, the batch envelope with `errors`, no CORS header.
 |---|---|
 | the web panel (175 KB) | API only |
 | the command line (`pair`, `approve`, `diag`, `control`, `fetch`, …) | no shell; the same actions are API calls, and breezectl makes them |
-| `unit_scan` | adding a unit by address remains (it probes that one address) |
+| `unit_scan`, `config_api`, `delete_unit` | the unit list is the deployer's: adding (with its probe of the address), renaming and deleting units, and `GET /api/config`, are gone. `POST /api/units` answers 405, the rest 404. A unit changes by deploying a new bundle |
 | `system_info`, `metrics` | host introspection; a log line and `/api/health` cover a chip |
 | `compression` | the answers are small; gzip is code and RAM |
-| cloud token fetch | TLS is most of a megabyte; V3 credentials come from wherever they are already kept (another Breeze Core's config, an export) |
-| `unit_history` | **open** — decide with the S3's real RAM figures (a small ring per unit, or none) |
+| cloud token fetch | TLS is most of a megabyte; the deployer gets V3 credentials with breeze-token, on the user's computer |
+| `unit_history` | **open**. The RAM figures are in (see Budgets): there is room for a small ring per unit |
 
 ## Shape of the code
 
@@ -108,19 +109,19 @@ request body (4 KB), programs and timers (fixed tables). Memory use is a number
 that can be stated, not a curve.
 
 **A small platform trait** supplies what the core cannot: monotonic and wall
-time, random bytes, TCP listen/accept/connect/read/write, UDP for the
-single-address probe, a few files, and a log line. Each target is an adapter:
+time, random bytes, TCP listen/accept/connect/read/write, a few files
+(written in pieces), and a log line. Each target is an adapter:
 
 | Adapter | For |
 |---|---|
 | `ucore-host` | Linux, macOS, Windows: development, the differential test, and incidentally a very small build for a router |
-| `ucore-esp32` | ESP32-S3 first; then the other ESP32s. esp-hal + embassy, or ESP-IDF — decided by a spike (below) |
+| `ports/esp32` | ESP32-S3 and ESP32-C6, by a feature. esp-hal and smoltcp, driven by the core's own poll loop: no executor (chosen in milestone 3, below) |
 | later | Raspberry Pi Pico 2 W (RP2350), as proof that the next chip is an adapter and not a port |
 
 **Time.** Schedules and timers run on local time. The core's scheduling takes
 `now` as a parameter (as Breeze Core's does); the adapter sets the clock from
-SNTP, and a POSIX TZ rule in the configuration (`CET-1CEST,M3.5.0,M10.5.0/3`)
-turns it into local time — a chip has no timezone database. Until the clock is
+SNTP, and a POSIX TZ rule in `env.json` (`CET-1CEST,M3.5.0,M10.5.0/3`,
+`ucore::tz`) turns it into local time — a chip has no timezone database. Until the clock is
 set, schedules and timers wait and `/api/health` says so.
 
 **The protocol.** V3 sessions and V2 packets as state machines: the handshake,
@@ -129,17 +130,30 @@ does after 30 s. Written small, checked against the same vectors as Breeze
 Core's `breeze-proto` and against breeze-mock's emulated units, misbehaviour
 included.
 
-**Setup**, for the audience it is for: Wi-Fi credentials and the TZ rule are
-given once — over the serial port (Improv, which browser flashers speak) or in a
-small config partition. The first boot generates the API key and prints it on
-the serial console; `GET /api/config` from the LAN is the admin view after that.
+**Storage**: two logs in flash (`ucore::flashlog`: append, header written
+last, compacted into the other half when full, so a power cut leaves a file
+old or new). `ucore` is the store μCore writes; `ucorecfg` is the bundle the
+deployer writes (`config.json` and `env.json`). Files are written in pieces,
+never held whole: on a chip whole copies were the largest allocations.
 
-## Budgets (to be measured, then held)
+## Budgets
 
-- ESP32-S3 without PSRAM: μCore's own heap at most 160 KB with 8 units, 4
-  clients and 2 streams; flash for the application at most 1 MB.
-- A host build of a few hundred kilobytes.
-- A test fails when a budget is exceeded.
+Measured in Espressif's QEMU (milestone 3), DESIGN.md's worst case: 8 units,
+16 paired devices, 16 programs, 16 timers, 2 event streams and 2 busy clients
+for 90 s.
+
+| | Budget | Measured |
+|---|---|---|
+| μCore's heap, ESP32-S3 without PSRAM | 160 KB | peak 110–117 KB; 60 KB idle after |
+| application flash, with Wi-Fi | 1 MB | 817 KB (S3), with the add-unit code gone |
+| the same without Wi-Fi (QEMU) | | 447 KB (S3) |
+
+For scale: ESP-IDF's own Wi-Fi station example, with no application in it,
+is 704 KB and 110 KB of static RAM. Notes on size: the SHA-512 that Ed25519
+verification needs is built compact (45 KB less); panics carry no file and
+line strings (11 KB less, the backtrace still maps to source); `opt-level =
+"z"` came out 25 KB *larger* than `"s"` on Xtensa. Text is about 17 KB of the
+image and nearly all of it is Breeze Core's wire contract.
 
 ## How it is checked
 
@@ -150,31 +164,73 @@ the serial console; `GET /api/config` from the LAN is the admin view after that.
   `differential.rs` does).
 - **`breeze-core diag`** pointed at μCore passes everything μCore advertises.
 - **The clients**: the Android app and breezectl against a μCore, by hand.
-- **On the chip**: Espressif's QEMU (emulated Ethernet) with breeze-mock units on
-  the PC, then a real ESP32-S3 on Wi-Fi.
+- **On the chip**: Espressif's QEMU (its emulated OpenCores Ethernet), with
+  breeze-mock units on the PC's loopback reached through QEMU's user network:
+  `breeze-core diag` passes against an emulated S3 and C6. Then a real board
+  on Wi-Fi.
 
 ## Milestones
 
-1. **Units on the host.** `ucore` + `ucore-host`: health, version, units, state,
-   batch state, control, capabilities, behind the API key and device tokens
-   preset in `devices.json`. Differential test green for those routes.
-2. **All of Breeze Core that μCore keeps.** Pairing, signed requests, devices,
-   config routes, timers, programs and curves, the event stream. Differential
-   test green for every kept route; `diag` passes.
-3. **The chip spike.** The same core on an ESP32-S3: esp-hal + embassy against
-   ESP-IDF, chosen on code size, RAM and how cleanly the adapter stays an
-   adapter. In QEMU, then on a board.
-4. **The chip, properly.** Wi-Fi setup, SNTP and TZ, flash storage, watchdog,
-   memory and flash budgets enforced.
-5. **Shipping it.** Firmware images, flashing from the browser on aspic, the
-   docs, breezectl's admin commands for a μCore (approve, add a unit), a
-   breeze-mock profile so clients can be tested against a μCore.
-6. **A second chip** (Pico 2 W), to prove the portability is real.
+1. **Units on the host.** Done.
+2. **All of Breeze Core that μCore keeps.** Done: differential test and `diag`.
+3. **The chip spike.** Done in QEMU (2026-11-18): esp-hal with smoltcp and no
+   executor against ESP-IDF, chosen on size and RAM (Budgets) and because the
+   core's poll loop drives smoltcp directly. A real board still to confirm it.
+4. **The chip, properly.** Done: the flash store and the bundle, SNTP and the
+   TZ rule, budgets measured. Left for a real board: Wi-Fi in practice
+   (reconnecting, signal), the watchdog.
+5. **The deployer** (see Deployment), which replaces shipping firmware.
+6. **A second chip**: the ESP32-C6 already runs in QEMU; the Pico 2 W proves
+   it beyond Espressif.
 
 ## Open questions
 
-- `unit_history`: in (a small ring) or out — after the RAM figures.
-- esp-hal + embassy or ESP-IDF — after the spike.
-- Keep-warm (holding unit connections open): on, off, or per unit, given the
-  socket count a chip allows.
-- Defaults for the limits above, once measured.
+- `unit_history`: in (a small ring) or out.
+- Keep-warm (holding unit connections open): on, off, or per unit.
+- Defaults for the limits, now that the figures are in.
+
+## Deployment
+
+μCore is not shipped as firmware. A **deployer** builds it for one household:
+"you're already setting up a hobbyist board". It is a page in the browser and
+a **helper** program on the user's computer that does the work. The page is
+either served by the helper from a μCore checkout, or loaded from aspic; in
+both cases it talks only to the helper on `127.0.0.1`.
+
+What it does, in order:
+
+1. **The board**: one of `boards/*.toml` in the μCore repository (chip, flash
+   size, network), or the user's own, edited on the page.
+2. **The units**: breeze-token, as a library, signs in to the Midea account
+   the units are paired with and fetches each unit's token and key, checking
+   them on the unit. This is `config.json`.
+3. **The environment**: Wi-Fi, the zone (picked by name, turned into a POSIX
+   TZ rule), the time server, a hostname. This is `env.json`.
+4. **The firmware**: the helper fetches μCore's source at a release, installs
+   the toolchains it needs into its own folder (Rust, and for an S3 the Xtensa
+   toolchain and GCC; never the user's PATH or environment), builds for that
+   board, and flashes it over USB.
+5. **The bundle**: `config.json` and `env.json` as a `ucorecfg` image
+   (`ucore::bundle::image`), flashed to that partition.
+
+A **configuration-only page** does just step 5 (and 2 or 3 as needed): a new
+unit, a new Wi-Fi password, a different zone. No toolchain, no build, and the
+store (paired phones, programs, timers) is not touched.
+
+**Everything stays on the user's computer**, and the page says so plainly.
+It is also made checkable rather than promised:
+
+- The page's Content-Security-Policy allows it to connect to the helper on
+  `127.0.0.1` and nowhere else; the browser refuses anything else. It loads
+  nothing from anywhere but where it came from: no fonts, scripts or
+  analytics from elsewhere.
+- The helper itself only ever contacts: the source and toolchain downloads
+  (GitHub, static.rust-lang.org, Espressif's releases), and **Midea's cloud,
+  with the user's own account, to fetch the units' tokens** — the one thing
+  that cannot be done locally, and the page says so where it asks for the
+  password. Nothing the user types goes anywhere else. The page shows every
+  connection the helper made, as it makes it.
+- The helper listens on `127.0.0.1` only, answers only the page (its own
+  origin or aspic's, with a token it hands the page when it opens it), and
+  keeps each deployment's files (secrets included) in its own folder,
+  readable by the user alone.
