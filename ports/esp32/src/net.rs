@@ -158,7 +158,11 @@ impl<D: Device> Chip<D> {
         let mut i = 0;
         while i < self.closing.len() {
             let h = self.closing[i];
-            if self.sockets.get::<tcp::Socket>(h).is_active() {
+            let s = self.sockets.get::<tcp::Socket>(h);
+            // TIME-WAIT only guards against stray segments of a connection
+            // whose close is already done; on a LAN its buffers are better
+            // spent on the next client than held for ten seconds.
+            if s.is_active() && s.state() != tcp::State::TimeWait {
                 i += 1;
             } else {
                 self.sockets.remove(h);
@@ -181,6 +185,7 @@ impl<D: Device> Chip<D> {
         }
     }
 
+    #[cfg(feature = "stats")]
     pub fn sockets_in_use(&self) -> usize {
         self.sockets.iter().count()
     }
@@ -324,12 +329,25 @@ impl<D: Device> Platform for Chip<D> {
     }
 
     fn read_file(&mut self, name: &str) -> Option<Vec<u8>> {
-        self.store.read(name)
+        match self.store.read(name) {
+            Ok(file) => file,
+            Err(e) => {
+                esp_println::println!("store: cannot read {name}: {e}");
+                None
+            }
+        }
     }
 
-    fn write_file(&mut self, name: &str, data: &[u8], _private: bool) -> Result<(), alloc::string::String> {
-        self.store.write(name, data);
-        Ok(())
+    fn file_begin(&mut self, name: &str, private: bool) -> Result<(), alloc::string::String> {
+        self.store.begin(name, private)
+    }
+
+    fn file_write(&mut self, data: &[u8]) -> Result<(), alloc::string::String> {
+        self.store.write(data)
+    }
+
+    fn file_end(&mut self, keep: bool) -> Result<(), alloc::string::String> {
+        self.store.end(keep)
     }
 
     fn log(&mut self, line: &str) {

@@ -1,0 +1,7 @@
+# Breeze μCore on a 4 MB ESP32-S3. The app slot leaves room for a second one
+# (OTA, later) below the store, so adding it moves nothing that holds data.
+# Name,     Type, SubType, Offset,   Size
+nvs,        data, nvs,     0x9000,   0x5000
+phy_init,   data, phy,     0xf000,   0x1000
+factory,    app,  factory, 0x10000,  0x180000
+ucore,      data, undefined, 0x310000, 0x40000

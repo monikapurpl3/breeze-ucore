@@ -44,17 +44,16 @@ fn main() -> ! {
     let rng = esp_hal::rng::Rng::new();
     let tz = ucore::tz::Rule::parse(TZ).expect("UCORE_TZ is a POSIX TZ rule");
 
+    let store = store::open(peripherals.FLASH);
+
     #[cfg(feature = "qemu")]
-    let dev = {
-        let _ = peripherals;
-        openeth::OpenEth::new()
-    };
+    let dev = openeth::OpenEth::new();
     #[cfg(feature = "qemu")]
     let mac = dev.mac();
     #[cfg(feature = "wifi")]
-    let (dev, mac) = wifi::start(peripherals);
+    let (dev, mac) = wifi::start(peripherals.TIMG0, peripherals.FROM_CPU_INTR0, peripherals.WIFI);
 
-    let mut chip = net::Chip::new(dev, mac, rng, tz, store::Store::seeded());
+    let mut chip = net::Chip::new(dev, mac, rng, tz, store);
     let mut core = ucore::Core::new(&mut chip, ucore::Settings::default());
     println!("{} on port {}", ucore::banner(&core), net::API_PORT);
 
@@ -65,6 +64,8 @@ fn main() -> ! {
         let wait = core.poll(&mut chip);
         chip.poll();
         chip.idle(wait);
+        #[cfg(feature = "wifi")]
+        chip.dev.keep(net::now_ms());
         #[cfg(feature = "stats")]
         {
             let now = net::now_ms();

@@ -1,6 +1,8 @@
 [build]
 target = "xtensa-esp32s3-none-elf"
-rustflags = ["-C", "link-arg=-nostartfiles"]
+# No file and line strings in panics: 11 KB of flash. A panic still prints a
+# backtrace, whose addresses the ELF turns back into source lines.
+rustflags = ["-C", "link-arg=-nostartfiles", "-Zlocation-detail=none"]
 
 [unstable]
 build-std = ["alloc", "core"]
