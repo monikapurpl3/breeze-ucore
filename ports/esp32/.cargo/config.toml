@@ -4,7 +4,10 @@ target = "xtensa-esp32s3-none-elf"
 [target.xtensa-esp32s3-none-elf]
 # No file and line strings in panics: 11 KB of flash. A panic still prints a
 # backtrace, whose addresses the ELF turns back into source lines.
-rustflags = ["-C", "link-arg=-nostartfiles", "-Zlocation-detail=none"]
+# --no-warn-rwx-segments: GNU ld notes that a segment is writable and
+# executable, which on an ESP32 is the design (IRAM), and rustc turns that
+# note into a warning in every build log, the deployer's included.
+rustflags = ["-C", "link-arg=-nostartfiles", "-C", "link-arg=-Wl,--no-warn-rwx-segments", "-Zlocation-detail=none"]
 
 [target.riscv32imac-unknown-none-elf]
 # Frame pointers: esp-backtrace's backtraces need them on RISC-V.
