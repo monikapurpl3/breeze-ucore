@@ -17,3 +17,8 @@ serde = { version = "1.0", default-features = false, features = ["derive", "allo
 # parser is one ULP off, which rewrites the file on every save (Breeze Core
 # found this the hard way).
 serde_json = { version = "1.0", default-features = false, features = ["alloc", "float_roundtrip"] }
+
+[dev-dependencies]
+# The tz database, to check the POSIX TZ rules against (tests only).
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono-tz = "0.10"

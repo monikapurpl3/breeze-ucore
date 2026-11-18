@@ -20,6 +20,7 @@ pub mod programs;
 pub mod proto;
 pub mod store;
 pub mod timers;
+pub mod tz;
 pub mod unit;
 
 pub use crate::server::{banner, Core, Settings, MAX_CLIENTS};
