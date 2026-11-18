@@ -12,6 +12,7 @@ extern crate alloc;
 
 pub mod api;
 pub mod auth;
+pub mod bundle;
 pub mod clock;
 pub mod flashlog;
 mod server;

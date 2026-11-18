@@ -274,6 +274,11 @@ impl<F: Flash> FlashLog<F> {
         self.entries.iter().map(|e| e.name.as_str())
     }
 
+    /// The flash underneath, for a log built in RAM to be written out.
+    pub fn into_flash(self) -> F {
+        self.flash
+    }
+
     /// Bytes free in the active half.
     pub fn free(&self) -> u32 {
         self.half - self.end

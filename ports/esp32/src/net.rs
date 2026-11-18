@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use core::net::IpAddr;
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::Device;
-use smoltcp::socket::{dhcpv4, dns, tcp, udp};
+use smoltcp::socket::{dhcpv4, dns, tcp};
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Cidr};
 use ucore::platform::{Conn, NetError, NetKind, Platform};
@@ -53,7 +53,6 @@ fn to_std(ip: IpAddress) -> IpAddr {
 
 enum Kind {
     Tcp { since: u64 },
-    Udp,
 }
 
 struct Open {
@@ -78,11 +77,12 @@ pub struct Chip<D: Device> {
     pub(crate) clock: crate::sntp::Clock,
     tz: ucore::tz::Rule,
     rng: esp_hal::rng::Rng,
-    store: crate::store::Store,
+    store: crate::store::Log,
+    bundle: crate::store::Log,
 }
 
 impl<D: Device> Chip<D> {
-    pub fn new(mut dev: D, mac: [u8; 6], rng: esp_hal::rng::Rng, tz: ucore::tz::Rule, store: crate::store::Store) -> Self {
+    pub fn new(mut dev: D, mac: [u8; 6], rng: esp_hal::rng::Rng, tz: ucore::tz::Rule, (store, bundle): (crate::store::Log, crate::store::Log), ntp: alloc::string::String) -> Self {
         let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(mac)));
         config.random_seed = (u64::from(rng.random()) << 32) | u64::from(rng.random());
         let iface = Interface::new(config, &mut dev, now());
@@ -102,10 +102,11 @@ impl<D: Device> Chip<D> {
             dhcp,
             dns,
             ip: None,
-            clock: crate::sntp::Clock::new(),
+            clock: crate::sntp::Clock::new(ntp),
             tz,
             rng,
             store,
+            bundle,
         }
     }
 
@@ -204,11 +205,6 @@ impl<D: Device> Chip<D> {
         let h = self.find(conn)?.handle;
         Ok(self.sockets.get_mut::<tcp::Socket>(h))
     }
-
-    fn udp(&mut self, conn: Conn) -> Result<&mut udp::Socket<'static>, NetError> {
-        let h = self.find(conn)?.handle;
-        Ok(self.sockets.get_mut::<udp::Socket>(h))
-    }
 }
 
 impl<D: Device> Platform for Chip<D> {
@@ -243,10 +239,7 @@ impl<D: Device> Platform for Chip<D> {
     }
 
     fn is_connected(&mut self, conn: Conn) -> Result<bool, NetError> {
-        let since = match self.find(conn)?.kind {
-            Kind::Tcp { since } => since,
-            Kind::Udp => return Ok(true),
-        };
+        let Kind::Tcp { since } = self.find(conn)?.kind;
         let s = self.tcp(conn)?;
         match s.state() {
             tcp::State::Established | tcp::State::CloseWait => {
@@ -295,41 +288,14 @@ impl<D: Device> Platform for Chip<D> {
     fn close(&mut self, conn: Conn) {
         let Some(i) = self.open.iter().position(|o| o.conn == conn) else { return };
         let o = self.open.swap_remove(i);
-        match o.kind {
-            Kind::Tcp { .. } => {
-                self.sockets.get_mut::<tcp::Socket>(o.handle).close();
-                self.closing.push(o.handle);
-            }
-            Kind::Udp => {
-                self.sockets.remove(o.handle);
-            }
-        }
-    }
-
-    fn udp_open(&mut self) -> Result<Conn, NetError> {
-        let rx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 1024]);
-        let tx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 2], vec![0; 512]);
-        let mut s = udp::Socket::new(rx, tx);
-        let port = self.ephemeral();
-        s.bind(port).map_err(|_| NetError::new(NetKind::Other, "cannot bind"))?;
-        let h = self.sockets.add(s);
-        Ok(self.add(h, Kind::Udp))
-    }
-
-    fn udp_send(&mut self, sock: Conn, to: IpAddr, port: u16, data: &[u8]) -> Result<(), NetError> {
-        let to = IpEndpoint::new(to_smol(to)?, port);
-        self.udp(sock)?.send_slice(data, to).map_err(|_| NetError::new(NetKind::WouldBlock, "cannot send"))
-    }
-
-    fn udp_recv(&mut self, sock: Conn, buf: &mut [u8]) -> Result<(usize, IpAddr), NetError> {
-        match self.udp(sock)?.recv_slice(buf) {
-            Ok((n, meta)) => Ok((n, to_std(meta.endpoint.addr))),
-            Err(_) => Err(NetError::new(NetKind::WouldBlock, "nothing yet")),
-        }
+        self.sockets.get_mut::<tcp::Socket>(o.handle).close();
+        self.closing.push(o.handle);
     }
 
     fn read_file(&mut self, name: &str) -> Option<Vec<u8>> {
-        match self.store.read(name) {
+        // config.json is the deployer's, in the bundle; the rest are μCore's own.
+        let log = if name == ucore::bundle::CONFIG { &mut self.bundle } else { &mut self.store };
+        match log.read(name) {
             Ok(file) => file,
             Err(e) => {
                 esp_println::println!("store: cannot read {name}: {e}");

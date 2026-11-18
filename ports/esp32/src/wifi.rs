@@ -2,48 +2,40 @@
 //! smoltcp device. esp-radio needs esp-rtos's scheduler for its own tasks;
 //! μCore itself stays one loop on the main task.
 //!
-//! The network and its password are `UCORE_WIFI_SSID` and
-//! `UCORE_WIFI_PASSWORD` at build time for now. Milestone 4 moves them to a
-//! setting given once over the serial port (Improv), as DESIGN.md says.
+//! The network and its password come from `env.json`, which the deployer
+//! writes (see `ucore::bundle`).
 
+use alloc::string::String;
 use esp_hal::peripherals::{FROM_CPU_INTR0, TIMG0, WIFI};
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::wifi::{AuthenticationMethodConfig, Config, Interface, WifiController, WifiRxToken, WifiTxToken};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
 use smoltcp::time::Instant;
 
-const SSID: &str = match option_env!("UCORE_WIFI_SSID") {
-    Some(s) => s,
-    None => "",
-};
-const PASSWORD: &str = match option_env!("UCORE_WIFI_PASSWORD") {
-    Some(s) => s,
-    None => "",
-};
-
 pub struct Wifi {
+    ssid: String,
     iface: Interface,
     controller: WifiController<'static>,
     next_check: u64,
 }
 
 /// Start the radio and join the network, trying until it works.
-pub fn start(timg0: TIMG0<'static>, int0: FROM_CPU_INTR0<'static>, radio: WIFI<'static>) -> (Wifi, [u8; 6]) {
+pub fn start(timg0: TIMG0<'static>, int0: FROM_CPU_INTR0<'static>, radio: WIFI<'static>, ssid: &str, password: &str) -> (Wifi, [u8; 6]) {
     let timg0 = TimerGroup::new(timg0);
     esp_rtos::start(timg0.timer0, int0);
     let mut controller = WifiController::new(radio, Default::default()).expect("the Wi-Fi controller");
-    let auth = if PASSWORD.is_empty() {
+    let auth = if password.is_empty() {
         AuthenticationMethodConfig::Open
     } else {
-        AuthenticationMethodConfig::Wpa2Personal(PASSWORD.try_into().expect("UCORE_WIFI_PASSWORD fits"))
+        AuthenticationMethodConfig::Wpa2Personal(password.try_into().expect("the Wi-Fi password fits"))
     };
     let station = esp_radio::wifi::sta::StationConfig::default()
-        .with_ssid(SSID.try_into().expect("UCORE_WIFI_SSID fits"))
+        .with_ssid(ssid.try_into().expect("the Wi-Fi name fits"))
         .with_authentication(auth);
     controller.set_config(&Config::Station(station)).expect("a station configuration");
     let iface = Interface::station();
     let mac = iface.mac_address();
-    let mut wifi = Wifi { iface, controller, next_check: 0 };
+    let mut wifi = Wifi { ssid: ssid.into(), iface, controller, next_check: 0 };
     wifi.join();
     (wifi, mac)
 }
@@ -53,11 +45,11 @@ impl Wifi {
         loop {
             match embassy_futures::block_on(self.controller.connect_async()) {
                 Ok(_) => {
-                    esp_println::println!("wifi: joined {SSID}");
+                    esp_println::println!("wifi: joined {}", self.ssid);
                     return;
                 }
                 Err(e) => {
-                    esp_println::println!("wifi: cannot join {SSID} ({e:?}); trying again");
+                    esp_println::println!("wifi: cannot join {} ({e:?}); trying again", self.ssid);
                     esp_hal::delay::Delay::new().delay_millis(3_000);
                 }
             }
@@ -72,7 +64,7 @@ impl Wifi {
         }
         self.next_check = now_ms + 5_000;
         if !self.controller.is_connected() {
-            esp_println::println!("wifi: lost {SSID}");
+            esp_println::println!("wifi: lost {}", self.ssid);
             self.join();
         }
     }

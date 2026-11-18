@@ -1,30 +1,39 @@
-//! The store files in flash: the `ucore` partition (see `partitions.csv`),
-//! as a [`ucore::flashlog::FlashLog`], so a power cut leaves every file
-//! either as it was or as it was being written.
+//! The two flash partitions μCore keeps its files in (see `partitions.csv`),
+//! each a [`ucore::flashlog::FlashLog`]:
 //!
-//! A build can carry a seed (`UCORE_SEED_DIR`): those files are written in
-//! at boot when the store does not have them yet, and never over anything
-//! it has.
+//! - `ucore`, the store: what μCore itself writes (paired devices, programs,
+//!   timers). A power cut leaves every file as it was or as it was being
+//!   written.
+//! - `ucorecfg`, the bundle: `config.json` and `env.json`, written whole by
+//!   the deployer over USB and only read here (see [`ucore::bundle`]). A new
+//!   configuration needs no new firmware and leaves the store alone.
 
-// An emulated C6 keeps the log in RAM (see RamFlash), so the partition code
-// goes unused there.
+// An emulated C6 keeps both in RAM (see `open`), so the partition code goes
+// unused there.
 #![cfg_attr(all(feature = "qemu", feature = "esp32c6"), allow(dead_code))]
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 use esp_storage::FlashStorage;
+use ucore::bundle::RamFlash;
 use ucore::flashlog::{Flash, FlashLog};
 
-include!(concat!(env!("OUT_DIR"), "/seed.rs"));
+// Only an emulated C6 reads it (see open).
+#[cfg_attr(not(all(feature = "qemu", feature = "esp32c6")), allow(dead_code))]
+mod seed {
+    include!(concat!(env!("OUT_DIR"), "/seed.rs"));
+}
 
-const PARTITION: &str = "ucore";
+const STORE: &str = "ucore";
+const BUNDLE: &str = "ucorecfg";
 const TABLE_AT: u32 = 0x8000;
 
-/// The partition, through esp-storage. Writes go from a word-aligned buffer
-/// of its own: esp-storage would otherwise copy an unaligned one through a
-/// 4 KB buffer on the stack.
+/// A partition, through the one esp-storage driver both logs share. Writes go
+/// from a word-aligned buffer of its own: esp-storage would otherwise copy an
+/// unaligned one through a 4 KB buffer on the stack.
 pub struct Partition {
-    flash: FlashStorage<'static>,
+    flash: &'static RefCell<FlashStorage<'static>>,
     offset: u32,
     size: u32,
 }
@@ -38,14 +47,15 @@ impl Flash for Partition {
     }
 
     fn read(&mut self, offset: u32, buf: &mut [u8]) -> Result<(), String> {
-        read_flash(&mut self.flash, self.offset + offset, buf)
+        read_flash(&mut self.flash.borrow_mut(), self.offset + offset, buf)
     }
 
     fn write(&mut self, offset: u32, data: &[u8]) -> Result<(), String> {
         let mut staged = Aligned([0; 256]);
+        let mut flash = self.flash.borrow_mut();
         for (i, chunk) in data.chunks(256).enumerate() {
             staged.0[..chunk.len()].copy_from_slice(chunk);
-            self.flash
+            flash
                 .write_nor(self.offset + offset + (i * 256) as u32, &staged.0[..chunk.len()])
                 .map_err(|e| alloc::format!("flash write: {e:?}"))?;
         }
@@ -53,44 +63,46 @@ impl Flash for Partition {
     }
 
     fn erase(&mut self, offset: u32, len: u32) -> Result<(), String> {
-        self.flash.erase(self.offset + offset, self.offset + offset + len).map_err(|e| alloc::format!("flash erase: {e:?}"))
+        let from = self.offset + offset;
+        self.flash.borrow_mut().erase(from, from + len).map_err(|e| alloc::format!("flash erase: {e:?}"))
     }
 }
 
-#[cfg(not(all(feature = "qemu", feature = "esp32c6")))]
-pub type Store = FlashLog<Partition>;
+/// Where a log lives: a partition, or RAM (an emulated C6, below).
+pub enum Backing {
+    Part(Partition),
+    #[cfg_attr(not(all(feature = "qemu", feature = "esp32c6")), allow(dead_code))]
+    Ram(RamFlash),
+}
 
-/// Espressif's QEMU loses a byte at every 16-byte boundary of a flash read on
-/// its ESP32-C6 machine (the S3 machine, and real chips, read correctly; the
-/// bootloader reads through the cache and does not notice). So an emulated
-/// C6 keeps the log on 64 KB of RAM instead: everything but esp-storage
-/// itself still runs, and nothing outlives a reset.
-#[cfg(all(feature = "qemu", feature = "esp32c6"))]
-pub type Store = FlashLog<RamFlash>;
-
-#[cfg(all(feature = "qemu", feature = "esp32c6"))]
-pub struct RamFlash(alloc::boxed::Box<[u8]>);
-
-#[cfg(all(feature = "qemu", feature = "esp32c6"))]
-impl Flash for RamFlash {
+impl Flash for Backing {
     fn size(&self) -> u32 {
-        self.0.len() as u32
+        match self {
+            Self::Part(p) => p.size(),
+            Self::Ram(r) => r.size(),
+        }
     }
     fn read(&mut self, offset: u32, buf: &mut [u8]) -> Result<(), String> {
-        buf.copy_from_slice(&self.0[offset as usize..offset as usize + buf.len()]);
-        Ok(())
+        match self {
+            Self::Part(p) => p.read(offset, buf),
+            Self::Ram(r) => r.read(offset, buf),
+        }
     }
     fn write(&mut self, offset: u32, data: &[u8]) -> Result<(), String> {
-        for (m, b) in self.0[offset as usize..].iter_mut().zip(data) {
-            *m &= *b;
+        match self {
+            Self::Part(p) => p.write(offset, data),
+            Self::Ram(r) => r.write(offset, data),
         }
-        Ok(())
     }
     fn erase(&mut self, offset: u32, len: u32) -> Result<(), String> {
-        self.0[offset as usize..(offset + len) as usize].fill(0xFF);
-        Ok(())
+        match self {
+            Self::Part(p) => p.erase(offset, len),
+            Self::Ram(r) => r.erase(offset, len),
+        }
     }
 }
+
+pub type Log = FlashLog<Backing>;
 
 fn read_flash(flash: &mut FlashStorage<'static>, at: u32, buf: &mut [u8]) -> Result<(), String> {
     flash.read_nor(at, buf).map_err(|e| alloc::format!("flash read: {e:?}"))
@@ -116,26 +128,40 @@ fn find_partition(flash: &mut FlashStorage<'static>, label: &str) -> Option<(u32
     None
 }
 
-/// Find the partition, open the log on it, and write in the seed.
-pub fn open(flash: esp_hal::peripherals::FLASH<'static>) -> Store {
+/// Open the store and the bundle.
+///
+/// Espressif's QEMU loses a byte at every 16-byte boundary of a flash read on
+/// its ESP32-C6 machine (the S3 machine, and real chips, read correctly; the
+/// bootloader reads through the cache and does not notice). So an emulated C6
+/// keeps both logs in RAM: the store empty, the bundle built at boot from the
+/// build's seed (`UCORE_SEED_DIR`). Everything but esp-storage itself still
+/// runs there, and nothing outlives a reset.
+pub fn open(flash: esp_hal::peripherals::FLASH<'static>) -> (Log, Log) {
     #[cfg(not(all(feature = "qemu", feature = "esp32c6")))]
-    let mut store = {
-        let mut flash = FlashStorage::new(flash);
-        let (offset, size) = find_partition(&mut flash, PARTITION).expect("a partition called ucore");
-        FlashLog::open(Partition { flash, offset, size }).expect("the store partition")
+    let (store, bundle) = {
+        let shared: &'static RefCell<FlashStorage<'static>> = alloc::boxed::Box::leak(alloc::boxed::Box::new(RefCell::new(FlashStorage::new(flash))));
+        let part = |label: &str| {
+            let (offset, size) = find_partition(&mut shared.borrow_mut(), label).unwrap_or_else(|| panic!("a partition called {label}"));
+            Backing::Part(Partition { flash: shared, offset, size })
+        };
+        let (store, bundle) = (part(STORE), part(BUNDLE));
+        (FlashLog::open(store).expect("the store partition"), FlashLog::open(bundle).expect("the bundle partition"))
     };
     #[cfg(all(feature = "qemu", feature = "esp32c6"))]
-    let mut store = {
+    let (store, bundle) = {
         let _ = flash;
-        FlashLog::open(RamFlash(alloc::vec![0xFF; 64 * 1024].into_boxed_slice())).expect("the store")
+        let image = ucore::bundle::image(32 * 1024, seed::SEED).expect("the seed fits");
+        (
+            FlashLog::open(Backing::Ram(RamFlash::new(64 * 1024))).expect("the store"),
+            FlashLog::open(Backing::Ram(RamFlash(image))).expect("the bundle"),
+        )
     };
-    for (name, bytes) in SEED {
-        if store.read(name).ok().flatten().is_none() {
-            let wrote = store.begin(name, *name != "config.json").and_then(|()| store.write(bytes));
-            let _ = store.end(wrote.is_ok());
-        }
+    let names = |log: &Log| log.names().collect::<Vec<_>>().join(", ");
+    esp_println::println!("store: {} KB free; {}", store.free() / 1024, names(&store));
+    if bundle.names().next().is_none() {
+        esp_println::println!("bundle: empty. Deploy a configuration with the μCore deployer.");
+    } else {
+        esp_println::println!("bundle: {}", names(&bundle));
     }
-    let names: Vec<&str> = store.names().collect();
-    esp_println::println!("store: {} KB free; {}", store.free() / 1024, names.join(", "));
-    store
+    (store, bundle)
 }

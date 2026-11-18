@@ -24,12 +24,6 @@ use esp_println::println;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-/// The zone, as a POSIX TZ rule (see `ucore::tz`).
-const TZ: &str = match option_env!("UCORE_TZ") {
-    Some(t) => t,
-    None => "CET-1CEST,M3.5.0,M10.5.0/3",
-};
-
 /// μCore's heap: the RAM the bootloader used, which is free once the app
 /// runs, and a block of its own.
 const HEAP_RECLAIMED: usize = 64 * 1024;
@@ -42,18 +36,22 @@ fn main() -> ! {
     esp_alloc::heap_allocator!(size: HEAP_OWN);
 
     let rng = esp_hal::rng::Rng::new();
-    let tz = ucore::tz::Rule::parse(TZ).expect("UCORE_TZ is a POSIX TZ rule");
 
-    let store = store::open(peripherals.FLASH);
+    let (store, mut bundle) = store::open(peripherals.FLASH);
+    let env = ucore::bundle::env(&mut bundle, &mut |w| println!("{w}"));
+    let tz = ucore::tz::Rule::parse(&env.tz).unwrap_or_else(|| {
+        println!("env.json: tz {:?} is not a POSIX TZ rule; using UTC", env.tz);
+        ucore::tz::Rule::fixed(0)
+    });
 
     #[cfg(feature = "qemu")]
     let dev = openeth::OpenEth::new();
     #[cfg(feature = "qemu")]
     let mac = dev.mac();
     #[cfg(feature = "wifi")]
-    let (dev, mac) = wifi::start(peripherals.TIMG0, peripherals.FROM_CPU_INTR0, peripherals.WIFI);
+    let (dev, mac) = wifi::start(peripherals.TIMG0, peripherals.FROM_CPU_INTR0, peripherals.WIFI, &env.wifi_ssid, &env.wifi_password);
 
-    let mut chip = net::Chip::new(dev, mac, rng, tz, store);
+    let mut chip = net::Chip::new(dev, mac, rng, tz, (store, bundle), env.ntp.clone());
     let mut core = ucore::Core::new(&mut chip, ucore::Settings::default());
     println!("{} on port {}", ucore::banner(&core), net::API_PORT);
 

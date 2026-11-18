@@ -5,3 +5,5 @@ nvs,        data, nvs,     0x9000,   0x5000
 phy_init,   data, phy,     0xf000,   0x1000
 factory,    app,  factory, 0x10000,  0x180000
 ucore,      data, undefined, 0x310000, 0x40000
+# The deployer's bundle: config.json and env.json, rewritten whole over USB.
+ucorecfg,   data, undefined, 0x350000, 0x8000

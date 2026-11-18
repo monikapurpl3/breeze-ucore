@@ -1,11 +1,12 @@
-//! esp-hal's linker scripts, and the seed for the RAM store: every file in
+//! esp-hal's linker scripts, and a seed bundle for an emulated C6 (whose
+//! flash QEMU cannot read back; see `store::open`): every file in
 //! `UCORE_SEED_DIR`, embedded as it is.
 
 use std::fmt::Write as _;
 
 fn main() {
     println!("cargo:rustc-link-arg=-Tlinkall.x");
-    for var in ["UCORE_SEED_DIR", "UCORE_TZ", "UCORE_NTP", "UCORE_WIFI_SSID", "UCORE_WIFI_PASSWORD", "UCORE_COMMIT"] {
+    for var in ["UCORE_SEED_DIR", "UCORE_COMMIT"] {
         println!("cargo:rerun-if-env-changed={var}");
     }
     let mut seed = String::from("pub static SEED: &[(&str, &[u8])] = &[\n");

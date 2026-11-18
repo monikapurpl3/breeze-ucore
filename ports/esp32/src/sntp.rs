@@ -3,10 +3,11 @@
 //! battery-backed clock, so until the first answer the core knows no time,
 //! and its timers and schedules wait (Breeze Core's `/api/health` says so).
 //!
-//! The server is `UCORE_NTP` at build time, a name or an address;
-//! `pool.ntp.org` otherwise. Asked again every hour, and every few seconds
-//! until it first answers.
+//! The server is `env.json`'s `ntp`, a name or an address (see
+//! `ucore::bundle`). Asked again every hour, and every few seconds until it
+//! first answers.
 
+use alloc::string::String;
 use smoltcp::iface::SocketHandle;
 use smoltcp::phy::Device;
 use smoltcp::socket::{dns, udp};
@@ -14,10 +15,6 @@ use smoltcp::wire::{DnsQueryType, IpAddress, IpEndpoint};
 
 use crate::net::{now_ms, Chip};
 
-const SERVER: &str = match option_env!("UCORE_NTP") {
-    Some(s) => s,
-    None => "pool.ntp.org",
-};
 const NTP_TO_UNIX_S: u64 = 2_208_988_800;
 const RETRY_MS: u64 = 5_000;
 const RESYNC_MS: u64 = 3_600_000;
@@ -30,14 +27,15 @@ enum State {
 }
 
 pub struct Clock {
+    server: String,
     /// Unix milliseconds at a moment of the monotonic clock.
     synced: Option<(u64, u64)>,
     state: State,
 }
 
 impl Clock {
-    pub fn new() -> Self {
-        Self { synced: None, state: State::Idle { next: 0 } }
+    pub fn new(server: String) -> Self {
+        Self { server, synced: None, state: State::Idle { next: 0 } }
     }
 
     pub fn unix_ms(&self, mono: u64) -> Option<u64> {
@@ -54,11 +52,11 @@ impl<D: Device> Chip<D> {
         let retry = if self.clock.synced.is_some() { RESYNC_MS } else { RETRY_MS };
         match self.clock.state {
             State::Idle { next } if now >= next => {
-                if let Ok(ip) = SERVER.parse() {
+                if let Ok(ip) = self.clock.server.parse() {
                     self.ask(IpAddress::Ipv4(ip), now, retry);
                     return;
                 }
-                let query = self.sockets.get_mut::<dns::Socket>(self.dns).start_query(self.iface.context(), SERVER, DnsQueryType::A);
+                let query = self.sockets.get_mut::<dns::Socket>(self.dns).start_query(self.iface.context(), &self.clock.server, DnsQueryType::A);
                 self.clock.state = match query {
                     Ok(q) => State::Resolving(q, now),
                     Err(_) => State::Idle { next: now + retry },
@@ -84,7 +82,7 @@ impl<D: Device> Chip<D> {
                         let first = self.clock.synced.is_none();
                         self.clock.synced = Some((unix, now));
                         if first {
-                            esp_println::println!("clock: set from {SERVER}");
+                            esp_println::println!("clock: set from {}", self.clock.server);
                         }
                     }
                 } else if now - sent < ANSWER_MS {
