@@ -34,15 +34,15 @@ emulated units (breeze-mock).
 ## Versions
 
 **The product version is `<μCore version>u<Breeze Core native version>`**,
-for example `1.0.0u4.3.2`: μCore's own version, then `u`, then the Breeze
+for example `1.0.0u4.4.0`: μCore's own version, then `u`, then the Breeze
 Core native release whose behaviour it follows (its API, its store formats,
 the release the differential test runs against). That is what people see:
 release names, firmware file names, `--version`, the boot log. Cargo needs
 plain semver, so the crates are `1.0.0`, and the full string is built from
 that and one constant naming the native release.
 
-**On the wire it is `4.3.2+u1.0.0`.** `/api/version` reports the API it
-speaks, so anything that parses versions sees 4.3.2. The μCore version rides
+**On the wire it is `4.4.0+u1.0.0`.** `/api/version` reports the API it
+speaks, so anything that parses versions sees 4.4.0. The μCore version rides
 along as semver build metadata, which every parser ignores for comparison and
 every printer shows, so `diag`, breezectl and bug reports still say what the
 server really is. (The Android app's own parser splits at `-` and `+` before

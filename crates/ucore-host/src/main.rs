@@ -148,27 +148,81 @@ impl Platform for Host {
         std::fs::read(self.dir.join(name)).ok()
     }
 
-    /// Breeze Core's way: a temporary file, its mode, then a rename over the
-    /// old one. config.json is 640 (the admin group reads it), the rest 600.
     fn write_file(&mut self, name: &str, data: &[u8], private: bool) -> Result<(), String> {
-        let path = self.dir.join(name);
-        let tmp = path.with_extension("tmp");
-        let at = |p: &std::path::Path, e: std::io::Error| format!("{}: {e}", p.display());
-        std::fs::create_dir_all(&self.dir).map_err(|e| at(&self.dir, e))?;
-        std::fs::write(&tmp, data).map_err(|e| at(&tmp, e))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = if private { 0o600 } else { 0o640 };
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode)).map_err(|e| at(&tmp, e))?;
-        }
-        #[cfg(not(unix))]
-        let _ = private;
-        std::fs::rename(&tmp, &path).map_err(|e| at(&path, e))
+        write_store(&self.dir, name, data, private)
     }
 
     fn log(&mut self, line: &str) {
         eprintln!("{line}");
+    }
+}
+
+/// Breeze Core's way: a temporary file, its mode, its owner, then a rename
+/// over the old one. config.json is 640 (the admin group reads it), the rest
+/// 600.
+fn write_store(dir: &std::path::Path, name: &str, data: &[u8], private: bool) -> Result<(), String> {
+    let path = dir.join(name);
+    let tmp = path.with_extension("tmp");
+    let at = |p: &std::path::Path, e: std::io::Error| format!("{}: {e}", p.display());
+    std::fs::create_dir_all(dir).map_err(|e| at(dir, e))?;
+    #[cfg(unix)]
+    let owner = owner::of(&path);
+    std::fs::write(&tmp, data).map_err(|e| at(&tmp, e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if private { 0o600 } else { 0o640 };
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode)).map_err(|e| at(&tmp, e))?;
+        if let Some(owner) = owner {
+            if let Err(e) = owner::give(owner, &tmp, &path) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = private;
+    std::fs::rename(&tmp, &path).map_err(|e| at(&path, e))
+}
+
+/// Who a store file belongs to, as Breeze Core 4.4.0's store keeps it: a
+/// renamed-in file is the writer's, so a μCore run as root (or a tool run
+/// with sudo beside it) would leave config.json root:root for a service that
+/// runs as its own user. A replaced file keeps its owner and group, a new one
+/// gets its directory's; root that cannot hand it over keeps the old file.
+#[cfg(unix)]
+mod owner {
+    use std::os::unix::fs::{chown, MetadataExt};
+    use std::path::Path;
+
+    pub fn of(path: &Path) -> Option<(u32, u32)> {
+        let meta = match std::fs::metadata(path) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+                std::fs::metadata(dir).ok()?
+            }
+            Err(_) => return None,
+        };
+        Some((meta.uid(), meta.gid()))
+    }
+
+    pub fn give((uid, gid): (u32, u32), tmp: &Path, path: &Path) -> Result<(), String> {
+        let written = std::fs::metadata(tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        if (written.uid(), written.gid()) == (uid, gid) {
+            return Ok(());
+        }
+        match chown(tmp, Some(uid), Some(gid)) {
+            Ok(()) => Ok(()),
+            Err(e) if written.uid() == 0 => Err(format!(
+                "{} was left as it was: the new copy could not be given to its owner, {uid}:{gid} ({e})",
+                path.display()
+            )),
+            Err(_) => {
+                let _ = chown(tmp, None, Some(gid));
+                Ok(())
+            }
+        }
     }
 }
 
@@ -211,5 +265,39 @@ fn main() {
     loop {
         let wait = core.poll(&mut platform);
         std::thread::sleep(Duration::from_millis(wait.clamp(1, 50)));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::write_store;
+    use std::os::unix::fs::{chown, MetadataExt};
+
+    /// Breeze Core 4.4.0's store test, for μCore's: a replaced file keeps
+    /// its owner, a new one gets its directory's, and the mode is the store's.
+    /// Only root can give a file away, so as anyone else this proves nothing
+    /// and returns early; it runs as root in a container.
+    #[test]
+    fn a_replaced_file_keeps_its_owner_and_a_new_one_gets_its_directorys() {
+        let dir = std::env::temp_dir().join(format!("ucore-owner-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        if chown(&dir, Some(1842), Some(1842)).is_err() {
+            eprintln!("not root: nothing to show");
+            return;
+        }
+        let meta = |name: &str| {
+            let m = std::fs::metadata(dir.join(name)).unwrap();
+            (m.uid(), m.gid(), m.mode() & 0o777)
+        };
+        write_store(&dir, "config.json", b"{}", false).unwrap();
+        assert_eq!(meta("config.json"), (1842, 1842, 0o640), "a new file: its directory's owner");
+        chown(dir.join("config.json"), Some(1843), Some(1844)).unwrap();
+        write_store(&dir, "config.json", b"{\"a\":1}", false).unwrap();
+        assert_eq!(meta("config.json"), (1843, 1844, 0o640), "a replaced file keeps its owner");
+        write_store(&dir, "devices.json", b"{}", true).unwrap();
+        assert_eq!(meta("devices.json"), (1842, 1842, 0o600));
+        assert!(!dir.join("config.tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -12,7 +12,7 @@ no command line, nothing a microcontroller cannot carry.
 
 [![License](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
 [![Status](https://img.shields.io/badge/status-in%20development-e69138)](#status)
-[![Follows](https://img.shields.io/badge/follows-Breeze%20Core%204.3.2-6aa84f)](DESIGN.md#versions)
+[![Follows](https://img.shields.io/badge/follows-Breeze%20Core%204.4.0-6aa84f)](DESIGN.md#versions)
 
 </div>
 
@@ -52,8 +52,8 @@ and Breeze Core's own `diag` passes against it as it does against Breeze Core
 
 ## Versions
 
-`1.0.0u4.3.2` is μCore 1.0.0 following Breeze Core 4.3.2. On the wire,
-`/api/version` says `4.3.2+u1.0.0`, so clients see the API they speak.
+`1.0.0u4.4.0` is μCore 1.0.0 following Breeze Core 4.4.0. On the wire,
+`/api/version` says `4.4.0+u1.0.0`, so clients see the API they speak.
 
 ## Building
 

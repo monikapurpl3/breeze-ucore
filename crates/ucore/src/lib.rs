@@ -29,15 +29,15 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The Breeze Core native release whose behaviour μCore follows: its API, its
 /// store formats, and the release the differential test compares against.
-pub const NATIVE: &str = "4.3.2";
+pub const NATIVE: &str = "4.4.0";
 
-/// The product version people see: `1.0.0u4.3.2`.
+/// The product version people see: `1.0.0u4.4.0`.
 pub fn product_version() -> alloc::string::String {
     alloc::format!("{VERSION}u{NATIVE}")
 }
 
 /// The version `/api/version` reports: the API spoken, with μCore's version as
-/// semver build metadata, so a parser sees 4.3.2 and a printer shows both.
+/// semver build metadata, so a parser sees 4.4.0 and a printer shows both.
 pub fn wire_version() -> alloc::string::String {
     alloc::format!("{NATIVE}+u{VERSION}")
 }
