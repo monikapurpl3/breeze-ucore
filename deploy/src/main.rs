@@ -29,7 +29,8 @@ Usage: ucore-deploy [--port PORT] [--aspic] [--no-open] [--source DIR] [--data D
   --aspic        open the deployer's page on aspic instead of this helper's own
   --no-open      do not open a browser; print the link
   --source DIR   μCore's source to build from (default: the checkout this
-                 helper was built in, if it is there; else downloaded)
+                 helper was built in, if it is there; else downloaded);
+                 `--source github` downloads it even then
   --data DIR     where deployments and build tools are kept
   -h, --help     this
 ";
@@ -140,7 +141,11 @@ fn main() {
         }
     }
     let data = data.unwrap_or_else(data_dir);
-    let local_source = source.or_else(local_checkout);
+    let local_source = match source {
+        Some(s) if s.as_os_str() == "github" => None,
+        Some(s) => Some(s),
+        None => local_checkout(),
+    };
     let store = store::Store::open(&data).unwrap_or_else(|e| fail(&e));
     let mut raw = [0u8; 16];
     getrandom::getrandom(&mut raw).unwrap_or_else(|e| fail(&e.to_string()));

@@ -33,7 +33,7 @@ irm https://aspic.salataputarica.hr.eu.org/ucore-deploy/run.ps1 | iex       # Wi
 | `--port PORT` | where it listens on 127.0.0.1 (47820) |
 | `--aspic` | open the page on aspic instead of its own (the same page) |
 | `--no-open` | print the page's link instead of opening it |
-| `--source DIR` | μCore's source to build |
+| `--source DIR` | μCore's source to build (`github`: download it even from a checkout) |
 | `--data DIR` | where deployments and tools are kept |
 
 Deployments and the build tools it installs are kept in its own folder:
