@@ -72,9 +72,27 @@ pub trait Platform {
 
     /// A store file (`config.json`, `devices.json`, ...), if it exists.
     fn read_file(&mut self, name: &str) -> Option<Vec<u8>>;
-    /// Replace a store file whole, so a crash leaves the old one or the new
-    /// one and never half of either. `private` files are the owner's alone
-    /// (`config.json` is readable by the admin group, the rest are not).
-    fn write_file(&mut self, name: &str, data: &[u8], private: bool) -> Result<(), String>;
+
+    /// Start replacing a store file whole. Its new content follows in
+    /// [`Platform::file_write`] pieces, and [`Platform::file_end`] makes it
+    /// the file, so a crash leaves the old one or the new one and never half
+    /// of either. In pieces so that a chip never holds a whole file: the
+    /// programs of a busy household are tens of kilobytes of JSON.
+    /// `private` files are the owner's alone (`config.json` is readable by
+    /// the admin group, the rest are not). One file at a time.
+    fn file_begin(&mut self, name: &str, private: bool) -> Result<(), String>;
+    /// The next piece of the file begun.
+    fn file_write(&mut self, data: &[u8]) -> Result<(), String>;
+    /// `keep`: make what was written the file. Otherwise drop it, and the old
+    /// file stays.
+    fn file_end(&mut self, keep: bool) -> Result<(), String>;
+
+    /// Replace a store file whole with `data`.
+    fn write_file(&mut self, name: &str, data: &[u8], private: bool) -> Result<(), String> {
+        self.file_begin(name, private)?;
+        let wrote = self.file_write(data);
+        let ended = self.file_end(wrote.is_ok());
+        wrote.and(ended)
+    }
     fn log(&mut self, line: &str);
 }

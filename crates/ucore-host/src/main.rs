@@ -26,6 +26,8 @@ struct Host {
     next: Conn,
     conns: HashMap<Conn, Sock>,
     dir: PathBuf,
+    /// The store file being written, between file_begin and file_end.
+    pending: Option<Pending>,
 }
 
 fn net_error(e: std::io::Error) -> NetError {
@@ -148,8 +150,26 @@ impl Platform for Host {
         std::fs::read(self.dir.join(name)).ok()
     }
 
-    fn write_file(&mut self, name: &str, data: &[u8], private: bool) -> Result<(), String> {
-        write_store(&self.dir, name, data, private)
+    fn file_begin(&mut self, name: &str, private: bool) -> Result<(), String> {
+        if let Some(old) = self.pending.take() {
+            old.abandon();
+        }
+        self.pending = Some(Pending::begin(&self.dir, name, private)?);
+        Ok(())
+    }
+
+    fn file_write(&mut self, data: &[u8]) -> Result<(), String> {
+        self.pending.as_mut().ok_or("no store file begun")?.write(data)
+    }
+
+    fn file_end(&mut self, keep: bool) -> Result<(), String> {
+        let pending = self.pending.take().ok_or("no store file begun")?;
+        if keep {
+            pending.finish()
+        } else {
+            pending.abandon();
+            Ok(())
+        }
     }
 
     fn log(&mut self, line: &str) {
@@ -157,32 +177,75 @@ impl Platform for Host {
     }
 }
 
-/// Breeze Core's way: a temporary file, its mode, its owner, then a rename
-/// over the old one. config.json is 640 (the admin group reads it), the rest
-/// 600.
-fn write_store(dir: &std::path::Path, name: &str, data: &[u8], private: bool) -> Result<(), String> {
-    let path = dir.join(name);
-    let tmp = path.with_extension("tmp");
-    let at = |p: &std::path::Path, e: std::io::Error| format!("{}: {e}", p.display());
-    std::fs::create_dir_all(dir).map_err(|e| at(dir, e))?;
-    #[cfg(unix)]
-    let owner = owner::of(&path);
-    std::fs::write(&tmp, data).map_err(|e| at(&tmp, e))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = if private { 0o600 } else { 0o640 };
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode)).map_err(|e| at(&tmp, e))?;
-        if let Some(owner) = owner {
-            if let Err(e) = owner::give(owner, &tmp, &path) {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(e);
+/// A store file being written, Breeze Core's way: a temporary file beside
+/// it, then its mode, its owner, and a rename over the old one. config.json
+/// is 640 (the admin group reads it), the rest 600.
+struct Pending {
+    path: PathBuf,
+    tmp: PathBuf,
+    private: bool,
+    file: std::io::BufWriter<std::fs::File>,
+}
+
+fn at(p: &std::path::Path, e: std::io::Error) -> String {
+    format!("{}: {e}", p.display())
+}
+
+impl Pending {
+    fn begin(dir: &std::path::Path, name: &str, private: bool) -> Result<Self, String> {
+        let path = dir.join(name);
+        let tmp = path.with_extension("tmp");
+        std::fs::create_dir_all(dir).map_err(|e| at(dir, e))?;
+        let file = std::fs::File::create(&tmp).map_err(|e| at(&tmp, e))?;
+        Ok(Self { path, tmp, private, file: std::io::BufWriter::new(file) })
+    }
+
+    fn write(&mut self, data: &[u8]) -> Result<(), String> {
+        self.file.write_all(data).map_err(|e| at(&self.tmp, e))
+    }
+
+    fn finish(self) -> Result<(), String> {
+        let Self { path, tmp, private, file } = self;
+        let flushed = file.into_inner().map_err(|e| at(&tmp, e.into_error())).and_then(|f| f.sync_all().map_err(|e| at(&tmp, e)));
+        if let Err(e) = flushed {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = if private { 0o600 } else { 0o640 };
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode)).map_err(|e| at(&tmp, e))?;
+            if let Some(owner) = owner::of(&path) {
+                if let Err(e) = owner::give(owner, &tmp, &path) {
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(e);
+                }
             }
         }
+        #[cfg(not(unix))]
+        let _ = private;
+        std::fs::rename(&tmp, &path).map_err(|e| at(&path, e))
     }
-    #[cfg(not(unix))]
-    let _ = private;
-    std::fs::rename(&tmp, &path).map_err(|e| at(&path, e))
+
+    fn abandon(self) {
+        let Self { tmp, file, .. } = self;
+        drop(file);
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// A whole store file at once, through [`Pending`].
+#[cfg(all(test, unix))]
+fn write_store(dir: &std::path::Path, name: &str, data: &[u8], private: bool) -> Result<(), String> {
+    let mut pending = Pending::begin(dir, name, private)?;
+    match pending.write(data) {
+        Ok(()) => pending.finish(),
+        Err(e) => {
+            pending.abandon();
+            Err(e)
+        }
+    }
 }
 
 /// Who a store file belongs to, as Breeze Core 4.4.0's store keeps it: a
@@ -259,7 +322,7 @@ fn main() {
         std::process::exit(1);
     });
     listener.set_nonblocking(true).expect("a non-blocking listener");
-    let mut platform = Host { start: Instant::now(), listener, next: 0, conns: HashMap::new(), dir };
+    let mut platform = Host { start: Instant::now(), listener, next: 0, conns: HashMap::new(), dir, pending: None };
     let mut core = ucore::Core::new(&mut platform, settings());
     eprintln!("{} listening on {host}:{port}", ucore::banner(&core));
     loop {

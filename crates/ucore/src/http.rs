@@ -126,7 +126,21 @@ impl Response {
         self
     }
 
+    /// The status line and headers, and the body, apart: sent one after the
+    /// other, so a large body is never copied in behind its headers (on a
+    /// chip that copy was the biggest allocation a busy client made).
+    pub fn into_parts(self) -> (Vec<u8>, Vec<u8>) {
+        let head = self.head();
+        (head, self.body)
+    }
+
     pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = self.head();
+        out.extend_from_slice(&self.body);
+        out
+    }
+
+    fn head(&self) -> Vec<u8> {
         let mut head = alloc::format!(
             "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nCache-Control: no-store\r\n",
             self.status,
@@ -145,9 +159,7 @@ impl Response {
             head.push_str("\r\n");
         }
         head.push_str(&alloc::format!("Content-Length: {}\r\nConnection: close\r\n\r\n", self.body.len()));
-        let mut out = head.into_bytes();
-        out.extend_from_slice(&self.body);
-        out
+        head.into_bytes()
     }
 }
 

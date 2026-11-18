@@ -122,7 +122,9 @@ impl Pending {
 enum Phase {
     Reading,
     Waiting(Pending),
-    Writing { out: Vec<u8>, at: usize },
+    /// A response going out: its head, then its body (see
+    /// [`Response::into_parts`]); `at` counts across both.
+    Writing { head: Vec<u8>, body: Vec<u8>, at: usize },
     /// An event stream: never finished, written as events come.
     Streaming { out: Vec<u8>, at: usize, quiet_since: u64 },
 }
@@ -201,6 +203,13 @@ struct Runner {
     last_run: Option<String>,
     /// When the next pass is due, on the monotonic clock.
     next: u64,
+}
+
+impl Phase {
+    fn writing(response: Response) -> Self {
+        let (head, body) = response.into_parts();
+        Phase::Writing { head, body, at: 0 }
+    }
 }
 
 impl Core {
@@ -301,7 +310,7 @@ impl Core {
         loop {
             match p.recv(self.clients[i].conn, &mut chunk) {
                 Ok(0) => {
-                    self.clients[i].phase = Phase::Writing { out: Vec::new(), at: 0 };
+                    self.clients[i].phase = Phase::Writing { head: Vec::new(), body: Vec::new(), at: 0 };
                     return;
                 }
                 Ok(n) => {
@@ -314,7 +323,7 @@ impl Core {
                 }
                 Err(e) if e.kind == NetKind::WouldBlock => break,
                 Err(_) => {
-                    self.clients[i].phase = Phase::Writing { out: Vec::new(), at: 0 };
+                    self.clients[i].phase = Phase::Writing { head: Vec::new(), body: Vec::new(), at: 0 };
                     return;
                 }
             }
@@ -322,7 +331,7 @@ impl Core {
         match http::parse(&self.clients[i].buf) {
             Parsed::Incomplete => {
                 if now.saturating_sub(self.clients[i].since) > CLIENT_IDLE_MS {
-                    self.clients[i].phase = Phase::Writing { out: Vec::new(), at: 0 };
+                    self.clients[i].phase = Phase::Writing { head: Vec::new(), body: Vec::new(), at: 0 };
                 }
             }
             Parsed::Bad(status, message) => self.answer(i, Response::detail(status, message)),
@@ -338,7 +347,7 @@ impl Core {
     }
 
     fn answer(&mut self, i: usize, response: Response) {
-        self.clients[i].phase = Phase::Writing { out: response.to_bytes(), at: 0 };
+        self.clients[i].phase = Phase::writing(response);
     }
 
     /// A response now, or the unit work it is waiting for.
@@ -640,7 +649,7 @@ impl Core {
     }
 
     fn save_timers(&self, p: &mut impl Platform) -> Result<(), String> {
-        p.write_file("timers.json", &crate::store::to_json(&self.timers), true)
+        save_list(p, "timers.json", "timers", &self.timers.timers)
     }
 
     /// `/api/timers`: `None` for any other route.
@@ -850,13 +859,13 @@ impl Core {
         loop {
             match p.recv(self.clients[i].conn, &mut sink) {
                 Ok(0) => {
-                    self.clients[i].phase = Phase::Writing { out: chunk_end(), at: 0 };
+                    self.clients[i].phase = Phase::Writing { head: chunk_end(), body: Vec::new(), at: 0 };
                     return;
                 }
                 Ok(_) => {}
                 Err(e) if e.kind == NetKind::WouldBlock => return,
                 Err(_) => {
-                    self.clients[i].phase = Phase::Writing { out: Vec::new(), at: 0 };
+                    self.clients[i].phase = Phase::Writing { head: Vec::new(), body: Vec::new(), at: 0 };
                     return;
                 }
             }
@@ -926,7 +935,7 @@ impl Core {
     }
 
     fn save_programs(&self, p: &mut impl Platform) -> Result<(), Response> {
-        p.write_file("programs.json", &crate::store::to_json(&self.programs), true)
+        save_list(p, "programs.json", "programs", &self.programs.programs)
             .map_err(|e| Response::detail(500, &alloc::format!("cannot write the program store: {e}")))
     }
 
@@ -1038,7 +1047,7 @@ impl Core {
 
     /// A unit of an apply answered: on to the next, or the answer.
     fn apply_next(&mut self, unit: u64, outcome: Outcome, mut rest: Vec<u64>, request: ControlRequest, mut done: Vec<Vec<u8>>) -> Phase {
-        let writing = |r: Response| Phase::Writing { out: r.to_bytes(), at: 0 };
+        let writing = |r: Response| Phase::writing(r);
         match outcome {
             Outcome::Control(Ok((sent, echoed))) => {
                 let Some(u) = self.units.iter().find(|x| x.id == unit) else { return writing(Response::detail(503, NOT_A_UNIT)) };
@@ -1143,13 +1152,13 @@ impl Core {
         for c in self.clients.iter_mut() {
             if matches!(&c.phase, Phase::Waiting(pending) if pending.unit(id)) {
                 let r = Response::detail(503, "the unit was removed or replaced while this request waited");
-                c.phase = Phase::Writing { out: r.to_bytes(), at: 0 };
+                c.phase = Phase::writing(r);
             }
         }
     }
 
     fn save_devices(&self, p: &mut impl Platform) -> Result<(), Response> {
-        p.write_file("devices.json", &crate::store::to_json(&self.devices), true)
+        save_list(p, "devices.json", "devices", &self.devices.devices)
             .map_err(|e| Response::detail(500, &alloc::format!("cannot write the device store: {e}")))
     }
 
@@ -1322,7 +1331,7 @@ impl Core {
             }
             _ => return,
         };
-        self.clients[i].phase = Phase::Writing { out: response.to_bytes(), at: 0 };
+        self.clients[i].phase = Phase::writing(response);
     }
 
     fn write_clients(&mut self, p: &mut impl Platform, now: u64) {
@@ -1330,12 +1339,14 @@ impl Core {
         while i < self.clients.len() {
             let c = &mut self.clients[i];
             let done = match &mut c.phase {
-                Phase::Writing { out, at } => {
+                Phase::Writing { head, body, at } => {
                     loop {
-                        if *at >= out.len() {
-                            break true;
-                        }
-                        match p.send(c.conn, &out[*at..]) {
+                        let rest = match at.checked_sub(head.len()) {
+                            None => &head[*at..],
+                            Some(b) if b < body.len() => &body[b..],
+                            Some(_) => break true,
+                        };
+                        match p.send(c.conn, rest) {
                             Ok(0) => break false,
                             Ok(n) => {
                                 *at += n;
@@ -1449,6 +1460,15 @@ struct Health {
 }
 
 /// For the log line at start.
+/// Save a `{"key": [...]}` store file (private) a piece at a time, so that
+/// no whole copy of it is ever in memory: see [`crate::store::write_list`].
+fn save_list<T: serde::Serialize>(p: &mut impl Platform, name: &str, key: &str, items: &[T]) -> Result<(), String> {
+    p.file_begin(name, true)?;
+    let wrote = crate::store::write_list(key, items, &mut |b| p.file_write(b));
+    let ended = p.file_end(wrote.is_ok());
+    wrote.and(ended)
+}
+
 pub fn banner(core: &Core) -> String {
     alloc::format!("Breeze μCore {} (API {}), {} unit(s)", crate::product_version(), crate::NATIVE, core.units.len())
 }

@@ -102,6 +102,35 @@ pub fn to_json<T: Serialize>(value: &T) -> Vec<u8> {
     serde_json::to_vec_pretty(value).unwrap_or_default()
 }
 
+/// `{"<key>": [items]}` in exactly the bytes [`to_json`] gives, handed to
+/// `out` a piece at a time and never whole: each item is serialised on its
+/// own, and indented by the four spaces its place in
+/// the list adds. That is sound because pretty JSON never has a newline
+/// inside a string (it is written `\n`), so every newline in an item is one
+/// of the formatter's own.
+pub fn write_list<T: Serialize>(key: &str, items: &[T], out: &mut dyn FnMut(&[u8]) -> Result<(), String>) -> Result<(), String> {
+    let quoted = serde_json::to_vec(key).map_err(|e| alloc::format!("{e}"))?;
+    out(b"{\n  ")?;
+    out(&quoted)?;
+    if items.is_empty() {
+        return out(b": []\n}");
+    }
+    out(b": [\n")?;
+    for (i, item) in items.iter().enumerate() {
+        // One item's worth: a few hundred bytes to a couple of kilobytes.
+        let buf = serde_json::to_vec_pretty(item).map_err(|e| alloc::format!("{e}"))?;
+        out(b"    ")?;
+        for (j, line) in buf.split(|b| *b == b'\n').enumerate() {
+            if j > 0 {
+                out(b"\n    ")?;
+            }
+            out(line)?;
+        }
+        out(if i + 1 < items.len() { b",\n" } else { b"\n" })?;
+    }
+    out(b"  ]\n}")
+}
+
 /// Hex to bytes; `None` for anything that is not an even run of hex digits.
 pub fn unhex(s: &str) -> Option<Vec<u8>> {
     if s.len() % 2 != 0 {
