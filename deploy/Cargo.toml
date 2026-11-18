@@ -1,7 +1,7 @@
 [package]
 name = "ucore-deploy"
 description = "The Breeze μCore deployer's helper: builds μCore for one household, from a page in the browser, and keeps everything on this computer."
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 publish = false

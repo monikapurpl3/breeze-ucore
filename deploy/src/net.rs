@@ -4,7 +4,8 @@
 //!
 //! There are three kinds of destination, and no others:
 //! - downloads: μCore's source, and the build tools (a fixed list of hosts),
-//!   plus the Rust libraries cargo fetches from crates.io while building;
+//!   plus the Rust libraries cargo fetches from crates.io while building, and
+//!   breeze-mock from aspic, only when simulated units are made;
 //! - Midea's cloud, with the user's own account, to fetch the units' tokens;
 //! - this network: looking for air conditioners, and trying a token on one.
 
@@ -41,7 +42,15 @@ impl Log {
 }
 
 /// The only hosts a download may come from.
-const DOWNLOAD_HOSTS: &[&str] = &["github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com", "codeload.github.com", "static.rust-lang.org"];
+const DOWNLOAD_HOSTS: &[&str] = &[
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "codeload.github.com",
+    "static.rust-lang.org",
+    // breeze-mock, for simulated units.
+    "aspic.salataputarica.hr.eu.org",
+];
 
 fn host_of(url: &str) -> &str {
     url.split("://").nth(1).unwrap_or(url).split(['/', ':']).next().unwrap_or("")

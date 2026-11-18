@@ -5,6 +5,8 @@
 //! deployments/<id>/config.json       the API key and the units (Breeze Core's format)
 //! deployments/<id>/flash.bin         a QEMU board's flash, once built
 //! deployments/<id>/serial.log        a QEMU board's console
+//! deployments/<id>/mock.xml          simulated units' blueprint, written at each start
+//! deployments/<id>/mock.log          what breeze-mock said
 //! ```
 //!
 //! config.json and deployment.json hold secrets (unit tokens, the Wi-Fi
@@ -32,6 +34,9 @@ pub struct Deployment {
     /// Where a QEMU board's API is forwarded to on this computer.
     #[serde(default = "default_port")]
     pub qemu_port: u16,
+    /// Which units are simulated by breeze-mock, if any.
+    #[serde(default)]
+    pub simulated: Option<crate::mock::Simulated>,
 }
 
 fn default_port() -> u16 {
@@ -141,7 +146,7 @@ impl Store {
         let id = format!("{}-{:02x}{:02x}", if slug.is_empty() { "board" } else { &slug[..slug.len().min(24)] }, suffix[0], suffix[1]);
         let used: Vec<u16> = self.list().iter().map(|d| d.qemu_port).collect();
         let qemu_port = (18420..18500).find(|p| !used.contains(p)).unwrap_or(18420);
-        let d = Deployment { id, name: name.into(), board, env: Env::default(), zone: String::new(), qemu_port };
+        let d = Deployment { id, name: name.into(), board, env: Env::default(), zone: String::new(), qemu_port, simulated: None };
         self.save(&d)?;
         let config = AppConfig { api_key: Some(new_api_key()), units: Vec::new() };
         self.save_config(&d.id, &config)?;

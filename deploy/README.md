@@ -46,13 +46,29 @@ Deployments and the build tools it installs are kept in its own folder:
 On Windows, an ESP32-S3 build needs Microsoft's C++ build tools (Espressif's
 Xtensa Rust is built for that host only); an ESP32-C6 build does not.
 
+## Simulated air conditioners
+
+No air conditioners at hand, or none you want a test board driving? The
+page can make 1 to 8 simulated ones for a board in QEMU.
+[breeze-mock](https://github.com/monikapurpl3/breeze-mock) plays them on
+their real network protocol, on this computer only (127.0.0.1, a port
+each), and they start and stop with the board, which reaches them as
+10.0.2.2. The deployer makes each one's id, token and key and keeps them in
+config.json like any unit's, so the units, μCore and a phone pairing with it
+all behave as with real ones. Rename or remove them on the page as usual;
+making them again replaces only the simulated ones.
+
+breeze-mock is downloaded the first time, from aspic, and checked against
+its SHA-256 (version 1.0.1, pinned in `src/mock.rs`).
+
 ## What stays local
 
 Everything, except what it says on its page: it downloads μCore's source and
-its build tools (GitHub, static.rust-lang.org, crates.io), and, only when you
-fetch tokens, signs in to Midea's cloud with your account. The page lists
-every connection the helper makes, and its Content-Security-Policy lets it
-talk to the helper on 127.0.0.1 and nowhere else.
+its build tools (GitHub, static.rust-lang.org, crates.io), breeze-mock from
+aspic if you make simulated air conditioners, and, only when you fetch
+tokens, signs in to Midea's cloud with your account. The page lists every
+connection the helper makes, and its Content-Security-Policy lets it talk to
+the helper on 127.0.0.1 and nowhere else.
 
 ## Testing
 

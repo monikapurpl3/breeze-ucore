@@ -7,12 +7,13 @@
 //! its Content-Security-Policy says so, and the browser enforces it.
 
 use std::io::Read;
+use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
 use tiny_http::{Header, Method, Request, Response};
 
-use crate::{boards, firmware, qemu, store, units, zones, App};
+use crate::{boards, firmware, mock, qemu, store, units, zones, App};
 
 /// Where the published page lives; it may drive a helper too.
 pub const ASPIC_ORIGIN: &str = "https://aspic.salataputarica.hr.eu.org";
@@ -168,19 +169,84 @@ fn route(app: &Arc<App>, method: &Method, path: &str, query: &str, body: &[u8]) 
 fn view(app: &App, d: &store::Deployment) -> Result<Value, (u16, Value)> {
     let config = app.store.config(&d.id).map_err(|e| error(500, e))?;
     let dir = app.store.dir(&d.id).map_err(|e| error(404, e))?;
+    let simulated = |id: i64| d.simulated.as_ref().is_some_and(|s| s.ids.contains(&id));
     let units: Vec<Value> = config
         .units
         .iter()
-        .map(|u| json!({"id": u.id.to_string(), "name": u.name, "ip": u.ip, "port": u.port, "has_credentials": u.token.is_some() && u.key.is_some()}))
+        .map(|u| json!({"id": u.id.to_string(), "name": u.name, "ip": u.ip, "port": u.port, "has_credentials": u.token.is_some() && u.key.is_some(), "simulated": simulated(u.id)}))
         .collect();
+    let sim = d.simulated.as_ref().map(|s| {
+        let ports: Vec<u16> = mock::units(&config, s).iter().map(|(_, u)| u.port).collect();
+        json!({"count": ports.len(), "ports": ports, "running": app.mock.is_running(&d.id)})
+    });
     let mut env = serde_json::to_value(&d.env).unwrap_or_default();
     // The page never gets the password back; only whether there is one.
     env["wifi_password"] = json!(null);
     env["has_wifi_password"] = json!(!d.env.wifi_password.is_empty());
     Ok(json!({
         "id": d.id, "name": d.name, "board": d.board, "env": env, "zone": d.zone, "qemu_port": d.qemu_port, "units": units,
-        "built": dir.join("flash.bin").exists(), "running": app.qemu.is_running(&d.id),
+        "built": dir.join("flash.bin").exists(), "running": app.qemu.is_running(&d.id), "simulated": sim,
     }))
+}
+
+/// Start a QEMU board, with its simulated units first if it has any (afresh,
+/// from the blueprint config.json gives now).
+fn start_board(app: &App, d: &store::Deployment, dir: &Path) -> Result<(), String> {
+    if let Some(sim) = &d.simulated {
+        let config = app.store.config(&d.id)?;
+        if !mock::units(&config, sim).is_empty() {
+            let program = mock::ensure(&app.data.join("tools"), &app.log, &|_| {})?;
+            app.mock.start(&d.id, &program, dir, &mock::blueprint(&mock::run_name(&d.id), &config, sim))?;
+        }
+    }
+    if let Err(e) = app.qemu.start(&d.id, &d.board, dir, d.qemu_port) {
+        app.mock.stop(&d.id);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Stop a board and its simulated units.
+fn stop_board(app: &App, id: &str) {
+    app.qemu.stop(id);
+    app.mock.stop(id);
+}
+
+/// Make `count` simulated units in place of the deployment's earlier ones:
+/// breeze-mock downloaded if need be, and made to read their blueprint
+/// before anything is kept.
+fn simulate(app: &App, id: &str, count: usize, say: &crate::jobs::Say) -> Result<Value, String> {
+    let program = mock::ensure(&app.data.join("tools"), &app.log, &|l| say.line(l))?;
+    let mut d = app.store.load(id)?;
+    let mut config = app.store.config(id)?;
+    // The deployment keeps its block of ports; a new one gets a free block.
+    let port = match &d.simulated {
+        Some(s) => s.port,
+        None => {
+            let taken: Vec<u16> = app.store.list().iter().filter(|o| o.id != id).filter_map(|o| o.simulated.as_ref().map(|s| s.port)).collect();
+            mock::free_block(&taken)
+        }
+    };
+    let sim = mock::replace(&mut config, d.simulated.as_ref(), count, port)?;
+    let dir = app.store.dir(id)?;
+    store::write_private(&dir.join("mock.xml"), mock::blueprint(&mock::run_name(id), &config, &sim).as_bytes())?;
+    say.line(format!("breeze-mock reads them: {}", mock::check(&program, &dir)?));
+    app.store.save_config(id, &config)?;
+    d.simulated = Some(sim);
+    app.store.save(&d)?;
+    say.line(format!(
+        "{count} simulated {} on this computer, ports {}–{}; the board reaches them at {}.",
+        if count == 1 { "unit" } else { "units" },
+        port,
+        port + count as u16 - 1,
+        mock::QEMU_HOST
+    ));
+    say.line(if app.qemu.is_running(id) {
+        "The board is still running with its old units: write the configuration to give it these."
+    } else {
+        "Build it (or write the configuration), then start it: the simulated units start and stop with the board."
+    });
+    Ok(json!({"count": count}))
 }
 
 fn deployment(app: &Arc<App>, method: &Method, id: &str, rest: &[&str], query: &str, body: &[u8]) -> Result<Value, (u16, Value)> {
@@ -189,7 +255,7 @@ fn deployment(app: &Arc<App>, method: &Method, id: &str, rest: &[&str], query: &
     match (method, rest) {
         (Method::Get, []) => view(app, &d),
         (Method::Delete, []) => {
-            app.qemu.stop(id);
+            stop_board(app, id);
             app.store.remove(id).map_err(|e| error(500, e))?;
             Ok(json!({}))
         }
@@ -277,13 +343,50 @@ fn deployment(app: &Arc<App>, method: &Method, id: &str, rest: &[&str], query: &
             });
             Ok(json!({"job": job}))
         }
+        (Method::Post, ["units", "simulate"]) => {
+            #[derive(serde::Deserialize)]
+            struct Count {
+                count: usize,
+            }
+            let n: Count = parse(body)?;
+            if !d.board.is_qemu() {
+                return Err(error(422, "Simulated units are for a board in QEMU: a real board would need them on your network, which the deployer does not do yet."));
+            }
+            if !(1..=mock::MAX).contains(&n.count) {
+                return Err(error(422, format!("1 to {} simulated units", mock::MAX)));
+            }
+            let title = format!("simulate:{id}");
+            if app.jobs.running(&title) {
+                return Err(error(409, "already making simulated units for this deployment"));
+            }
+            let (app2, id2) = (Arc::clone(app), id.to_string());
+            let job = app.jobs.spawn(&title, move |say| simulate(&app2, &id2, n.count, say));
+            Ok(json!({"job": job}))
+        }
+        (Method::Delete, ["units", "simulated"]) => {
+            if let Some(sim) = d.simulated.take() {
+                app.mock.stop(id);
+                let mut config = app.store.config(id).map_err(|e| error(500, e))?;
+                mock::remove(&mut config, &sim);
+                app.store.save_config(id, &config).map_err(|e| error(500, e))?;
+                app.store.save(&d).map_err(|e| error(500, e))?;
+            }
+            view(app, &d)
+        }
         (Method::Patch, ["units", unit]) | (Method::Delete, ["units", unit]) => {
             let mut config = app.store.config(id).map_err(|e| error(500, e))?;
             let Some(i) = config.units.iter().position(|u| u.id.to_string() == *unit) else {
                 return Err(error(404, "no such unit"));
             };
             if *method == Method::Delete {
-                config.units.remove(i);
+                let gone = config.units.remove(i).id;
+                if let Some(s) = &mut d.simulated {
+                    s.ids.retain(|x| *x != gone);
+                    if s.ids.is_empty() {
+                        d.simulated = None;
+                    }
+                    app.store.save(&d).map_err(|e| error(500, e))?;
+                }
             } else {
                 #[derive(serde::Deserialize)]
                 struct Name {
@@ -315,11 +418,11 @@ fn deployment(app: &Arc<App>, method: &Method, id: &str, rest: &[&str], query: &
             Ok(json!({"job": job}))
         }
         (Method::Post, ["run"]) => {
-            app.qemu.start(id, &d.board, &dir, d.qemu_port).map_err(|e| error(422, e))?;
+            start_board(app, &d, &dir).map_err(|e| error(422, e))?;
             view(app, &d)
         }
         (Method::Post, ["stop"]) => {
-            app.qemu.stop(id);
+            stop_board(app, id);
             view(app, &d)
         }
         (Method::Get, ["serial"]) => {
@@ -358,7 +461,7 @@ fn build(app: &App, d: &store::Deployment, say: &crate::jobs::Say) -> Result<Val
     let (store_at, store_size) = firmware::partition(&src, "ucore")?;
     let kept = if image.exists() { firmware::region(&image, store_at, store_size).ok() } else { None };
     let was_running = app.qemu.is_running(&d.id);
-    app.qemu.stop(&d.id);
+    stop_board(app, &d.id);
     let fresh = dir.join("flash.new.bin");
     app.tools.image(&src, &d.board, &elf, &fresh, say)?;
     if let Some(bytes) = &kept {
@@ -373,7 +476,7 @@ fn build(app: &App, d: &store::Deployment, say: &crate::jobs::Say) -> Result<Val
     }
     say.line(format!("Built: {}", image.display()));
     if was_running {
-        app.qemu.start(&d.id, &d.board, &dir, d.qemu_port)?;
+        start_board(app, d, &dir)?;
         say.line("Started it again.");
     }
     Ok(json!({"image": image.display().to_string()}))
@@ -396,12 +499,12 @@ fn configure(app: &App, d: &store::Deployment, say: &crate::jobs::Say) -> Result
     }
     let src = app.source(say)?;
     let was_running = app.qemu.is_running(&d.id);
-    app.qemu.stop(&d.id);
+    stop_board(app, &d.id);
     let (at, _) = firmware::partition(&src, "ucorecfg")?;
     firmware::patch(&image, at, &firmware::bundle_image(&src, &app.store.config(&d.id)?, d)?)?;
     say.line("Wrote the new configuration (config.json and env.json). The firmware and the store were not touched.");
     if was_running {
-        app.qemu.start(&d.id, &d.board, &dir, d.qemu_port)?;
+        start_board(app, d, &dir)?;
         say.line("Started it again with the new configuration.");
     }
     Ok(json!({}))

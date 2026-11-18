@@ -260,7 +260,7 @@ fn unzip_one(bytes: Vec<u8>, name: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-fn executable(path: &Path) -> Result<(), String> {
+pub(crate) fn executable(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

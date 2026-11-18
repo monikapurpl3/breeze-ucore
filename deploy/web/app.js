@@ -217,8 +217,20 @@ function render() {
   // The units.
   $('units').replaceChildren(...d.units.map(unitRow));
   $('no-units').hidden = d.units.length > 0;
-  // The environment.
   const qemu = d.board.network === 'qemu';
+  // Simulated units: a board in QEMU only.
+  const sim = d.simulated && d.simulated.count > 0 ? d.simulated : null;
+  $('sim-real').hidden = qemu;
+  $('simulate').hidden = !qemu;
+  $('sim-remove').hidden = !sim;
+  $('sim-now').hidden = !sim;
+  if (sim) {
+    $('sim-now').textContent = sim.count + ' simulated ' + (sim.count === 1 ? 'unit' : 'units') + ', on this computer\'s ' + portList(sim.ports) + '.';
+    $('sim-count').value = sim.count;
+  }
+  $('sim-running').hidden = !(sim && sim.running);
+  if (sim) $('sim-running').textContent = 'Its simulated units are running on this computer, ' + portList(sim.ports) + '.';
+  // The environment.
   $('wifi-fields').hidden = qemu;
   $('wifi-qemu').hidden = !qemu;
   $('e-ssid').value = d.env.wifi_ssid || '';
@@ -262,7 +274,10 @@ function unitRow(u) {
   nameCell.append(name);
   const actions = el('td');
   actions.append(remove);
-  tr.append(nameCell, el('td', u.ip + ':' + u.port), el('td', u.id), el('td', u.has_credentials ? '✓ checked' : '✗ none', u.has_credentials ? 'ok' : 'bad'), actions);
+  // A simulated unit's token was made here, with breeze-mock's copy, not
+  // checked on a unit.
+  const token = u.simulated ? '✓ simulated' : (u.has_credentials ? '✓ checked' : '✗ none');
+  tr.append(nameCell, el('td', u.ip + ':' + u.port + (u.simulated ? ' (simulated)' : '')), el('td', u.id), el('td', token, u.has_credentials ? 'ok' : 'bad'), actions);
   return tr;
 }
 
@@ -374,6 +389,33 @@ $('fetch').addEventListener('submit', async (ev) => {
     $('fetch-log').hidden = false;
     $('fetch-log').textContent = e.message;
   }
+});
+
+// Simulated units, by breeze-mock.
+function portList(ports) {
+  if (ports.length === 1) return 'port ' + ports[0];
+  const run = ports.every((p, i) => i === 0 || p === ports[i - 1] + 1);
+  return 'ports ' + (run ? ports[0] + '–' + ports[ports.length - 1] : ports.join(', '));
+}
+$('simulate').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  try {
+    const { job } = await api('POST', 'deployments/' + current.id + '/units/simulate', { count: Number($('sim-count').value) });
+    follow(job, $('sim-log'), async () => {
+      current = await api('GET', 'deployments/' + current.id);
+      render();
+    });
+  } catch (e) {
+    $('sim-log').hidden = false;
+    $('sim-log').textContent = e.message;
+  }
+});
+$('sim-remove').addEventListener('click', async () => {
+  if (!confirm('Remove the ' + current.simulated.count + ' simulated units from this deployment? Real units stay.')) return;
+  try {
+    current = await api('DELETE', 'deployments/' + current.id + '/units/simulated');
+    render();
+  } catch (e) { alert(e.message); }
 });
 
 // Building, configuring, running.

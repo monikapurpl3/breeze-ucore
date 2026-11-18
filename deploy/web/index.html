@@ -21,7 +21,7 @@
   <ul>
     <li>Your deployments (the air conditioners, their tokens, your Wi-Fi password, the API key) are kept by the helper on this computer, in <code id="data-dir">its own folder</code>, and nowhere else.</li>
     <li>This page can talk to the helper on this computer (<code>127.0.0.1</code>) and to nothing else. Its security policy forbids any other connection, and your browser enforces that.</li>
-    <li>The helper goes on the internet for two things only: to download μCore's source and what builds it (GitHub, static.rust-lang.org, and crates.io for the Rust libraries), and, only when you fetch tokens, to <strong>Midea's cloud, with your own Midea account</strong>. That is the one thing that cannot be done on this computer: only Midea hands out the air conditioners' tokens.</li>
+    <li>The helper goes on the internet for two things only: to download μCore's source and what builds it (GitHub, static.rust-lang.org, and crates.io for the Rust libraries; aspic for breeze-mock, if you make simulated air conditioners), and, only when you fetch tokens, to <strong>Midea's cloud, with your own Midea account</strong>. That is the one thing that cannot be done on this computer: only Midea hands out the air conditioners' tokens.</li>
     <li>Everything the helper connects to is listed here as it happens.</li>
   </ul>
   <details id="connections-box">
@@ -85,7 +85,7 @@
       <thead><tr><th scope="col">Name</th><th scope="col">Address</th><th scope="col">Id</th><th scope="col">Token</th><th scope="col"><span class="sr">Actions</span></th></tr></thead>
       <tbody id="units"></tbody>
     </table>
-    <p id="no-units" class="hint">None yet. Bring them in from a Breeze Core you already have, or fetch their tokens from Midea.</p>
+    <p id="no-units" class="hint">None yet. Bring them in from a Breeze Core you already have, fetch their tokens from Midea, or try μCore with simulated ones.</p>
 
     <details class="sub">
       <summary>From a Breeze Core you already have</summary>
@@ -109,6 +109,19 @@
         <button type="submit">Fetch the tokens</button>
       </form>
       <pre id="fetch-log" class="log" aria-live="polite" hidden></pre>
+    </details>
+
+    <details class="sub" id="sim-box">
+      <summary>Simulated ones, to try μCore without any (breeze-mock)</summary>
+      <p><a href="https://github.com/monikapurpl3/breeze-mock" target="_blank" rel="noopener noreferrer">breeze-mock</a> plays air conditioners on their real network protocol, here on this computer, beside the board in QEMU. They start and stop with the board, and only this computer can reach them. Making them again replaces the simulated ones; real units stay. The first time, the helper downloads breeze-mock from aspic and checks it.</p>
+      <p id="sim-real" class="hint" hidden>Simulated units are for a board in QEMU: a real board would need them on your network, which the deployer does not do yet.</p>
+      <form id="simulate" class="row">
+        <label>How many <input id="sim-count" type="number" min="1" max="8" value="3" required></label>
+        <button type="submit">Make them</button>
+        <button id="sim-remove" type="button" hidden>Remove the simulated units</button>
+      </form>
+      <p id="sim-now" class="hint" hidden></p>
+      <pre id="sim-log" class="log" aria-live="polite" hidden></pre>
     </details>
   </section>
 
@@ -141,6 +154,7 @@
     <pre id="build-log" class="log" aria-live="polite" hidden></pre>
     <div id="running" hidden>
       <p>μCore answers on this computer at <code id="address"></code>. <button id="show-key" type="button">Show the API key</button> <code id="api-key" hidden></code></p>
+      <p id="sim-running" hidden></p>
       <h4>Its console</h4>
       <pre id="serial" class="log console"></pre>
     </div>

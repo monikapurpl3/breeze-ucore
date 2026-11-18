@@ -226,7 +226,8 @@ It is also made checkable rather than promised:
   analytics from elsewhere.
 - The helper itself only ever contacts: the source and toolchain downloads
   (GitHub, static.rust-lang.org, Espressif's releases, and crates.io for the
-  Rust libraries cargo builds μCore from), and **Midea's cloud,
+  Rust libraries cargo builds μCore from), breeze-mock from aspic when the
+  user makes simulated units, and **Midea's cloud,
   with the user's own account, to fetch the units' tokens** — the one thing
   that cannot be done locally, and the page says so where it asks for the
   password. Nothing the user types goes anywhere else. The page shows every
@@ -235,6 +236,22 @@ It is also made checkable rather than promised:
   origin or aspic's, with a token it hands the page when it opens it), and
   keeps each deployment's files (secrets included) in its own folder,
   readable by the user alone.
+
+**Simulated units** (2026-11-18, the maintainer's idea): for a board in QEMU
+the page can make 1 to 8 air conditioners that breeze-mock plays, so μCore
+can be tried with none at hand. The deployer makes each unit's id, token and
+key itself and keeps them in config.json like a real unit's; deployment.json
+records which ids are simulated, and their blueprint is written from
+config.json each time they start, so the two agree by construction and a
+rename on the page reaches breeze-mock too. They listen on 127.0.0.1 (no
+firewall prompt; nothing on the network sees them), a block of 8 ports per
+deployment from 6450, and start and stop with the board, which reaches them
+as QEMU's 10.0.2.2. breeze-mock is downloaded once, pinned and checked, and
+made to read the blueprint (`breeze-mock check`) before anything is kept.
+Verified: Breeze Core's `diag` through the emulated S3 read all three units,
+and its `control` switched one, end to end. A real board would need the
+units on the LAN (Linux `attach`, Windows `existing` with a firewall
+prompt), which waits for real boards.
 
 **aspic's copy needs the browser's leave.** A public https page reaching
 `127.0.0.1` is what Chrome's Local Network Access guards: Chrome 157 asks the
