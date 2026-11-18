@@ -1,0 +1,47 @@
+[package]
+name = "ucore-esp32"
+description = "Breeze μCore on an ESP32: esp-hal and smoltcp, driven by the core's own poll loop."
+version = "1.0.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+publish = false
+
+# Its own workspace: it builds with Espressif's toolchain for a chip target,
+# the rest of the repository with the ordinary one for the host.
+[workspace]
+
+[[bin]]
+name = "ucore"
+path = "src/main.rs"
+test = false
+bench = false
+
+[features]
+default = ["qemu"]
+# Espressif's QEMU: the OpenCores Ethernet MAC it emulates, no radio.
+qemu = []
+# A real chip on Wi-Fi.
+wifi = ["dep:esp-radio", "dep:esp-rtos"]
+# Heap and socket figures on the console every 10 s.
+stats = ["esp-alloc/internal-heap-stats"]
+
+[dependencies]
+ucore = { path = "../../crates/ucore" }
+esp-hal = { version = "~1.2.2", features = ["esp32s3", "unstable"] }
+esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32s3"] }
+esp-alloc = { version = "0.11.0", features = ["esp32s3"] }
+esp-println = { version = "0.18.0", features = ["esp32s3"] }
+esp-backtrace = { version = "0.20.0", features = ["esp32s3", "panic-handler", "println"] }
+esp-radio = { version = "1.0.0-beta.1", features = ["esp-alloc", "esp32s3", "unstable", "wifi"], optional = true }
+esp-rtos = { version = "0.4.0", features = ["esp-alloc", "esp-radio", "esp32s3"], optional = true }
+smoltcp = { version = "0.14.0", default-features = false, features = [
+  "alloc", "medium-ethernet", "proto-ipv4", "proto-dhcpv4", "proto-dns",
+  "socket-tcp", "socket-udp", "socket-dhcpv4", "socket-dns",
+] }
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = 2
