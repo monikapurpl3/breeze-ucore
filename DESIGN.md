@@ -237,6 +237,22 @@ It is also made checkable rather than promised:
   keeps each deployment's files (secrets included) in its own folder,
   readable by the user alone.
 
+**Finding QEMU** (2026-11-20, the maintainer's idea): the PATH alone was too
+strict. Now remembered first (`qemu.json` in the data folder), then the PATH;
+when neither has it, the build (never the helper's start, and never a mere
+"start it") asks in the helper's own window: `/dev/tty` on Unix, because
+under `curl ... | sh` standard input is the script; the console on Windows.
+The answer may be any folder above the program (`qemu/bin` and one level of
+subfolders are searched, as Espressif's releases unpack), quotes and `~`
+allowed; a program is kept only once `-machine help` lists its board's
+machine, and every QEMU the boards use that the folder holds is kept at
+once. The page cannot set it on purpose: a page that can name a program for
+the helper to run is a page that can run anything, and aspic's copy is a
+page from the internet. Verified on Windows (a wrong quoted folder refused,
+the folder above both releases found both; Enter skips; no input fails at
+once) and on Linux in a container (with a pty from `script`, and without a
+terminal).
+
 **Simulated units** (2026-11-18, the maintainer's idea): for a board in QEMU
 the page can make 1 to 8 air conditioners that breeze-mock plays, so μCore
 can be tried with none at hand. The deployer makes each unit's id, token and

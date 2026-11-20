@@ -192,6 +192,8 @@ fn view(app: &App, d: &store::Deployment) -> Result<Value, (u16, Value)> {
 /// Start a QEMU board, with its simulated units first if it has any (afresh,
 /// from the blueprint config.json gives now).
 fn start_board(app: &App, d: &store::Deployment, dir: &Path) -> Result<(), String> {
+    // QEMU first: nothing is started for a board that cannot run.
+    let qemu = app.finder.find(&d.board)?;
     if let Some(sim) = &d.simulated {
         let config = app.store.config(&d.id)?;
         if !mock::units(&config, sim).is_empty() {
@@ -199,7 +201,7 @@ fn start_board(app: &App, d: &store::Deployment, dir: &Path) -> Result<(), Strin
             app.mock.start(&d.id, &program, dir, &mock::blueprint(&mock::run_name(&d.id), &config, sim))?;
         }
     }
-    if let Err(e) = app.qemu.start(&d.id, &d.board, dir, d.qemu_port) {
+    if let Err(e) = app.qemu.start(&d.id, &qemu, &d.board, dir, d.qemu_port) {
         app.mock.stop(&d.id);
         return Err(e);
     }
@@ -448,8 +450,9 @@ fn seed_for(app: &App, d: &store::Deployment) -> Result<Option<std::path::PathBu
 
 fn build(app: &App, d: &store::Deployment, say: &crate::jobs::Say) -> Result<Value, String> {
     d.board.check()?;
+    // Before the long part: asked for in the helper's window if need be.
     if d.board.is_qemu() {
-        qemu::find(&d.board)?;
+        app.finder.find_or_ask(&d.board, say)?;
     }
     let src = app.source(say)?;
     app.tools.ensure(&d.board.chip, &app.log, say)?;

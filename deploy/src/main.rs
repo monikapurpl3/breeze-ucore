@@ -50,6 +50,8 @@ pub struct App {
     pub log: net::Log,
     pub jobs: jobs::Jobs,
     pub qemu: qemu::Running,
+    /// Where Espressif's QEMU is.
+    pub finder: qemu::Finder,
     pub mock: mock::Running,
     pub local_source: Option<PathBuf>,
 }
@@ -155,7 +157,7 @@ fn main() {
 
     // This computer only: nothing on the network can reach the helper.
     let server = tiny_http::Server::http(("127.0.0.1", port)).unwrap_or_else(|e| fail(&format!("cannot listen on 127.0.0.1:{port}: {e} (another deployer running? try --port)")));
-    let app = Arc::new(App { tools: firmware::Tools::new(&data), data, token, port, store, log: net::Log::default(), jobs: jobs::Jobs::default(), qemu: qemu::Running::default(), mock: mock::Running::default(), local_source });
+    let app = Arc::new(App { tools: firmware::Tools::new(&data), finder: qemu::Finder::new(&data), data, token, port, store, log: net::Log::default(), jobs: jobs::Jobs::default(), qemu: qemu::Running::default(), mock: mock::Running::default(), local_source });
 
     let stopper = Arc::clone(&app);
     let _ = ctrlc::set_handler(move || {

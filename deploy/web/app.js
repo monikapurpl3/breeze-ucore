@@ -212,7 +212,7 @@ function render() {
   fillCustom(d.board);
   showCustom();
   $('board-hint').textContent = d.board.network === 'qemu'
-    ? 'Runs in Espressif\'s QEMU on this computer (' + (d.board.qemu ? d.board.qemu.program : '') + '), which you install yourself; the deployer looks for it on your PATH.'
+    ? 'Runs in Espressif\'s QEMU on this computer (' + (d.board.qemu ? d.board.qemu.program : '') + '), which you install yourself. The helper looks for it on your PATH; if it is not there, the build asks in the helper\'s own window where it is, and remembers.'
     : 'A real board, written to over USB.';
   // The units.
   $('units').replaceChildren(...d.units.map(unitRow));

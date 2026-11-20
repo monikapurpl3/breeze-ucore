@@ -7,8 +7,13 @@ in your browser that shows it what to do. DESIGN.md's
 
 For now it builds for the two QEMU boards in [`boards/`](../boards) only: no
 physical board has been tried yet. They run in Espressif's QEMU, which you
-install yourself and put on your PATH
-(<https://github.com/espressif/qemu/releases>).
+install yourself (<https://github.com/espressif/qemu/releases>). On your PATH
+is simplest; if it is not there, the first build asks in the helper's own
+window (the one you started it in) for its folder. The folder you unpacked
+it to is enough, and one answer covers both QEMUs if they are side by side.
+The helper checks that each runs its board's machine and remembers it in
+its folder (`qemu.json`). It asks there, and never takes a program's path
+from the page: which programs it runs is for whoever is at its window.
 
 ## Running it
 

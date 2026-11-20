@@ -12,5 +12,6 @@ file of the same shape, made on the deployer's page.
 | `[qemu]` | for `network = "qemu"`: the QEMU `program` and its `machine` |
 
 For now there are only QEMU boards: no physical board has been tried yet.
-QEMU itself is not installed by the deployer; it uses Espressif's QEMU from
-the PATH (https://github.com/espressif/qemu/releases).
+QEMU itself is not installed by the deployer: it uses Espressif's QEMU
+(https://github.com/espressif/qemu/releases) from the PATH, or from wherever
+the user tells the helper when a build asks.
